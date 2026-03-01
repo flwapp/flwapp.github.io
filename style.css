@@ -829,3 +829,77 @@ textarea.field-input { resize: vertical; min-height: 80px; }
 .guest-card h3 { font-size: .95rem; font-weight: 700; color: var(--text); margin-bottom: 6px; }
 .guest-card p  { font-size: .82rem; color: var(--muted2); margin-bottom: 12px; line-height: 1.4; }
 .guest-card .btn-primary { width: 100%; padding: 8px 0; font-size: .84rem; }
+.post-displayname {
+  font-weight: 600;
+  color: var(--text);
+  text-decoration: none;
+  font-size: .93rem;
+}
+.post-displayname:hover { text-decoration: underline; }
+.post-handle {
+  font-size: .8rem;
+  color: var(--muted2);
+  margin-left: 2px;
+}
+.verified-badge {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: 3px;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+}
+
+.profile-displayname-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.profile-displayname {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.profile-username-sub {
+  font-size: .88rem;
+  color: var(--muted2);
+  margin-top: 2px;
+}
+
+.admin-menu-wrap { position: relative; }
+.admin-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  min-width: 190px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.4);
+  z-index: 100;
+  overflow: hidden;
+}
+.admin-dropdown.hidden { display: none; }
+.admin-drop-item {
+  display: block;
+  width: 100%;
+  padding: 10px 14px;
+  text-align: left;
+  font-size: .87rem;
+  color: var(--text);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: background .12s;
+}
+.admin-drop-item:hover { background: var(--hover); }
+.admin-drop-item.danger { color: var(--red); }
+.admin-drop-item.danger:hover { background: rgba(244,63,63,.1); }
+.feed-refresh-btn {
+  margin-left: auto;
+  opacity: 0.6;
+  transition: opacity .15s, transform .3s;
+}
+.feed-refresh-btn:hover { opacity: 1; transform: rotate(180deg); }

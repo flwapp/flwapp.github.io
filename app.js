@@ -53,6 +53,18 @@ function strToColor(str) {
   return `hsl(${hue},55%,22%)`;
 }
 
+function isAdmin() {
+  return currentProfile?.username === 'flow';
+}
+
+function badgesFor(profile) {
+  if (!profile) return '';
+  let b = '';
+  if (profile.username === 'flow' || profile.verified)
+    b += `<img class="verified-badge" src="https://img.icons8.com/fluency/48/instagram-verification-badge.png" title="${profile.username === 'flow' ? 'Admin' : 'Verified'}" />`;
+  return b;
+}
+
 function showToast(msg, type = '') {
   const el = qs('#toast-el');
   el.textContent = msg;
@@ -228,6 +240,9 @@ async function renderFeed() {
         <button class="feed-tab active" data-tab="for-you">For you</button>
         <button class="feed-tab" data-tab="following">Following</button>
       </div>
+      <button class="icon-btn feed-refresh-btn" id="feed-refresh-btn" title="Refresh feed">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      </button>
     </div>
     <div class="post-list" id="feed-posts"><div class="full-loader"><div class="spinner"></div></div></div>`;
 
@@ -239,8 +254,48 @@ async function renderFeed() {
     });
   });
 
+  qs('#feed-refresh-btn')?.addEventListener('click', () => {
+    const activeTab = qs('.feed-tab.active', view)?.dataset.tab || 'for-you';
+    loadFeedPosts(activeTab);
+  });
+
   await loadFeedPosts('for-you');
   view.dataset.loaded = 'true';
+}
+
+// ── Algorithm scoring (TikTok/Twitter style) ────────────
+function scorePost(post, followingIds = [], seenIds = new Set()) {
+  const now = Date.now();
+  const ageMs = now - new Date(post.created_at).getTime();
+  const ageHours = ageMs / 3_600_000;
+
+  const likes     = (post.reactions || []).filter(r => r.type === 'like').length;
+  const reposts   = (post.reposts || []).length;
+  const bookmarks = (post.bookmarks || []).length;
+  const comments  = post.comment_count || 0;
+  const views     = post.view_count || 0;
+
+  // engagement score
+  let score = likes * 3 + reposts * 5 + bookmarks * 4 + comments * 2 + views * 0.1;
+
+  // media boost — visual content gets more reach
+  if (post.post_type === 'image') score *= 1.4;
+  if (post.post_type === 'video') score *= 1.7;
+
+  // freshness decay — older posts lose rank (half-life ~12h like Twitter)
+  const decay = Math.pow(0.5, ageHours / 12);
+  score *= decay;
+
+  // following boost — posts from people you follow rank higher
+  if (followingIds.includes(post.user_id)) score *= 1.6;
+
+  // already seen penalty
+  if (seenIds.has(post.id)) score *= 0.1;
+
+  // tiny random noise — prevents identical ranking every reload (TikTok does this)
+  score *= (0.85 + Math.random() * 0.3);
+
+  return score;
 }
 
 async function loadFeedPosts(tab) {
@@ -249,31 +304,54 @@ async function loadFeedPosts(tab) {
   list.innerHTML = '<div class="full-loader"><div class="spinner"></div></div>';
 
   let query = sb.from('posts')
-    .select('id, content, post_type, media_url, media_type, created_at, user_id, view_count, quote_of, profiles(id, username, avatar_url), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)')
+    .select('id, content, post_type, media_url, media_type, created_at, user_id, view_count, quote_of, profiles(id, username, avatar_url, display_name, verified), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)')
     .is('reply_to', null)
-    .order('created_at', { ascending: false })
-    .limit(40);
+    .limit(80); // fetch more so algorithm has more to pick from
 
   if (tab === 'following') {
     if (!currentUser) { list.innerHTML = emptyState('Sign in to see posts from people you follow.'); return; }
     const { data: follows } = await sb.from('follows').select('following_id').eq('follower_id', currentUser.id);
     const ids = (follows || []).map(f => f.following_id);
     if (!ids.length) { list.innerHTML = emptyState('Follow people to see their posts here.'); return; }
-    query = query.in('user_id', ids);
+    query = query.in('user_id', ids).order('created_at', { ascending: false });
+  } else {
+    // For you: recent window (last 7 days) so algorithm has fresh content
+    const weekAgo = new Date(Date.now() - 7 * 24 * 3_600_000).toISOString();
+    query = query.gte('created_at', weekAgo).order('created_at', { ascending: false });
   }
 
   const { data, error } = await query;
   if (error) { list.innerHTML = emptyState('Error loading feed.'); return; }
-  if (!data.length) { list.innerHTML = emptyState(tab === 'following' ? 'Nothing here yet.' : 'Be the first to Flow!'); return; }
+  if (!data?.length) { list.innerHTML = emptyState(tab === 'following' ? 'Nothing here yet.' : 'Be the first to Flow!'); return; }
 
-  const quoteIds = data.filter(p => p.quote_of).map(p => p.quote_of);
+  // Get following IDs for boost calculation
+  let followingIds = [];
+  if (currentUser && tab === 'for-you') {
+    const { data: follows } = await sb.from('follows').select('following_id').eq('follower_id', currentUser.id);
+    followingIds = (follows || []).map(f => f.following_id);
+  }
+
+  // Score and sort
+  const seenIds = new Set(JSON.parse(sessionStorage.getItem('flow_seen') || '[]'));
+  const scored = data
+    .map(p => ({ post: p, score: scorePost(p, followingIds, seenIds) }))
+    .sort((a, b) => b.score - a.score);
+
+  // Show top 40 ranked posts
+  const ranked = scored.slice(0, 40).map(s => s.post);
+
+  // Track seen posts this session
+  ranked.forEach(p => seenIds.add(p.id));
+  try { sessionStorage.setItem('flow_seen', JSON.stringify([...seenIds].slice(-200))); } catch {}
+
+  const quoteIds = ranked.filter(p => p.quote_of).map(p => p.quote_of);
   let quotedPosts = {};
   if (quoteIds.length) {
     const { data: qd } = await sb.from('posts').select('id, content, post_type, profiles(username, avatar_url)').in('id', quoteIds);
     if (qd) qd.forEach(q => quotedPosts[q.id] = q);
   }
 
-  list.innerHTML = data.map(p => postCardHTML(p, quotedPosts[p.quote_of])).join('');
+  list.innerHTML = ranked.map(p => postCardHTML(p, quotedPosts[p.quote_of])).join('');
   bindPostActions(list);
 }
 
@@ -311,19 +389,23 @@ function postCardHTML(post, quotedPost = null) {
 
   const topReacts = Object.entries(reacts).filter(([,v])=>v>0).slice(0,3).map(([t])=>({like:''})[t]||'').join('');
 
+  const displayName = p.display_name || p.username;
+  const canDelete = isOwn || isAdmin();
+
   return `
     <article class="post-card" data-post-id="${post.id}">
       <div class="post-head">
         <a href="#/profile/${esc(p.username)}">${avatarEl(p, 'size-md')}</a>
         <div class="post-meta">
           <span>
-            <a href="#/profile/${esc(p.username)}" class="post-username">@${esc(p.username)}</a>
+            <a href="#/profile/${esc(p.username)}" class="post-displayname">${esc(displayName)}</a>${badgesFor(p)}
+            <span class="post-handle">@${esc(p.username)}</span>
             <span class="post-dot">·</span>
             <span class="post-time">${timeAgo(post.created_at)}</span>
             ${typeBadge}
           </span>
         </div>
-        ${isOwn ? `<button class="delete-btn" data-post-id="${post.id}" title="Delete post">
+        ${canDelete ? `<button class="delete-btn" data-post-id="${post.id}" title="Delete post">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
         </button>` : ''}
       </div>
@@ -418,7 +500,9 @@ function copyLink(postId) {
 async function deletePost(postId, btn) {
   if (!confirm('Delete this post?')) return;
   btn.disabled = true;
-  await sb.from('posts').delete().eq('id', postId).eq('user_id', currentUser.id);
+  let query = sb.from('posts').delete().eq('id', postId);
+  if (!isAdmin()) query = query.eq('user_id', currentUser.id);
+  await query;
   btn.closest('.post-card')?.remove();
   showToast('Deleted.');
 }
@@ -657,10 +741,26 @@ async function renderProfile(username) {
         ${isOwn
             ? `<button class="btn-sm btn-outline" id="edit-profile-btn">Edit profile</button>`
             : `<button class="btn-follow ${isFollowing?'following':''}" id="profile-follow-btn" data-uid="${profile.id}">${isFollowing?'Following':'Follow'}</button>`}
+        ${(!isOwn && isAdmin()) ? `
+          <div class="admin-menu-wrap" style="position:relative">
+            <button class="btn-sm btn-outline" id="admin-menu-btn" title="Admin actions" style="padding:4px 8px">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+            </button>
+            <div class="admin-dropdown hidden" id="admin-dropdown">
+              <button class="admin-drop-item" id="adm-rename">Change username</button>
+              <button class="admin-drop-item" id="adm-verify">${profile.verified ? 'Remove checkmark' : 'Give checkmark'}</button>
+              <button class="admin-drop-item danger" id="adm-ban">Ban account</button>
+              <button class="admin-drop-item danger" id="adm-delete">Delete account</button>
+            </div>
+          </div>` : ''}
         </div>
       </div>
       <div class="profile-info">
-        <div class="profile-username">@${esc(profile.username)}</div>
+        <div class="profile-displayname-row">
+          <span class="profile-displayname">${esc(profile.display_name || profile.username)}</span>
+          ${badgesFor(profile)}
+        </div>
+        <div class="profile-username-sub">@${esc(profile.username)}</div>
         ${profile.bio ? `<div class="profile-bio">${esc(profile.bio)}</div>` : ''}
         <div class="profile-meta-row">
           ${profile.location ? `<span class="profile-meta-item"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>${esc(profile.location)}</span>` : ''}
@@ -708,6 +808,76 @@ async function renderProfile(username) {
       if (sn) sn.textContent = parseInt(sn.textContent) + (fb.classList.contains('following') ? 1 : -1);
     });
   }
+
+  if (!isOwn && isAdmin()) {
+    const menuBtn = qs('#admin-menu-btn');
+    const dropdown = qs('#admin-dropdown');
+    menuBtn?.addEventListener('click', e => {
+      e.stopPropagation();
+      dropdown.classList.toggle('hidden');
+    });
+    document.addEventListener('click', () => dropdown?.classList.add('hidden'), { once: true });
+
+    qs('#adm-rename')?.addEventListener('click', () => {
+      dropdown.classList.add('hidden');
+      const newName = prompt(`Change username for @${profile.username}:`);
+      if (!newName || newName.length < 3) return;
+      const clean = newName.toLowerCase().replace(/[^a-z0-9_]/g, '');
+      if (!clean) return;
+      showConfirmModal({
+        title: 'Change username',
+        message: `Change @${profile.username} → @${clean}?`,
+        confirmText: 'Change',
+        onConfirm: async () => {
+          const { error } = await sb.from('profiles').update({ username: clean }).eq('id', profile.id);
+          if (error) showToast(error.message, 'error');
+          else { showToast(`Username changed to @${clean}`); renderProfile(clean); }
+        }
+      });
+    });
+
+    qs('#adm-verify')?.addEventListener('click', async () => {
+      dropdown.classList.add('hidden');
+      const newVal = !profile.verified;
+      const { error } = await sb.from('profiles').update({ verified: newVal }).eq('id', profile.id);
+      if (error) showToast(error.message, 'error');
+      else { showToast(newVal ? 'Checkmark granted ✓' : 'Checkmark removed'); renderProfile(profile.username); }
+    });
+
+    qs('#adm-ban')?.addEventListener('click', () => {
+      dropdown.classList.add('hidden');
+      showConfirmModal({
+        title: 'Ban account',
+        message: `Ban @${profile.username}? They will be signed out and unable to use the platform.`,
+        confirmText: 'Ban',
+        confirmClass: 'btn-danger',
+        danger: true,
+        requireType: 'BAN',
+        onConfirm: async () => {
+          await sb.from('profiles').update({ banned: true }).eq('id', profile.id);
+          showToast(`@${profile.username} has been banned.`);
+          location.hash = '#/feed';
+        }
+      });
+    });
+
+    qs('#adm-delete')?.addEventListener('click', () => {
+      dropdown.classList.add('hidden');
+      showConfirmModal({
+        title: 'Delete account',
+        message: `Permanently delete @${profile.username} and all their data?`,
+        confirmText: 'Delete account',
+        confirmClass: 'btn-danger',
+        danger: true,
+        requireType: 'DELETE',
+        onConfirm: async () => {
+          await sb.from('profiles').delete().eq('id', profile.id);
+          showToast(`Account deleted.`);
+          location.hash = '#/feed';
+        }
+      });
+    });
+  }
 }
 
 async function loadProfileTab(tab, userId, isOwn) {
@@ -747,12 +917,8 @@ function renderProfileEditForm(profile) {
   area.innerHTML = `
     <div class="inline-edit-form" style="margin:16px">
       <div class="field-group">
-        <label class="field-label">Username</label>
-        <div class="input-prefix-wrap">
-          <span class="input-prefix">@</span>
-          <input class="field-input prefixed" id="ep-username" type="text" value="${esc(profile.username)}" maxlength="24" autocorrect="off" autocapitalize="none" spellcheck="false" />
-        </div>
-        <span class="field-hint" id="ep-username-hint"></span>
+        <label class="field-label">Display name</label>
+        <input class="field-input" id="ep-displayname" type="text" value="${esc(profile.display_name || profile.username)}" maxlength="50" placeholder="Your name" />
       </div>
       <div class="field-group">
         <label class="field-label">Bio</label>
@@ -778,30 +944,31 @@ function renderProfileEditForm(profile) {
 }
 
 async function saveProfileEdit(oldProfile) {
-  const username = qs('#ep-username').value.trim().toLowerCase().replace(/[^a-z0-9_]/g,'');
-  const bio      = qs('#ep-bio').value.trim();
-  const location = qs('#ep-location').value.trim();
-  const website  = qs('#ep-website').value.trim();
-  const errEl    = qs('#ep-error');
-  const btn      = qs('#ep-save');
+  const displayName = qs('#ep-displayname').value.trim();
+  const bio         = qs('#ep-bio').value.trim();
+  const loc         = qs('#ep-location').value.trim();
+  const website     = qs('#ep-website').value.trim();
+  const errEl       = qs('#ep-error');
+  const btn         = qs('#ep-save');
   errEl.textContent = '';
 
-  if (!username || username.length < 3) { errEl.textContent = 'Username must be 3+ chars.'; return; }
-
-  if (username !== oldProfile.username) {
-    const { data: ex } = await sb.from('profiles').select('id').eq('username', username).neq('id', currentUser.id).maybeSingle();
-    if (ex) { errEl.textContent = 'Username already taken.'; return; }
-  }
+  if (!displayName) { errEl.textContent = 'Display name is required.'; return; }
 
   btn.disabled = true; btn.textContent = 'Saving…';
-  const { error } = await sb.from('profiles').update({ username, bio: bio||null, location: location||null, website: website||null, updated_at: new Date().toISOString() }).eq('id', currentUser.id);
+  const { error } = await sb.from('profiles').update({
+    display_name: displayName,
+    bio: bio||null,
+    location: loc||null,
+    website: website||null,
+    updated_at: new Date().toISOString()
+  }).eq('id', currentUser.id);
   btn.disabled = false; btn.textContent = 'Save changes';
   if (error) { errEl.textContent = error.message; return; }
 
-  currentProfile = { ...currentProfile, username, bio: bio||null, location: location||null, website: website||null };
+  currentProfile = { ...currentProfile, display_name: displayName, bio: bio||null, location: loc||null, website: website||null };
   showToast('Profile updated!');
-  if (username !== oldProfile.username) location.hash = `#/profile/${username}`;
-  else { qs('#profile-edit-area').innerHTML = ''; renderProfile(username); }
+  qs('#profile-edit-area').innerHTML = '';
+  renderProfile(oldProfile.username);
 }
 
 async function uploadAvatar(file, profile) {
@@ -1452,11 +1619,9 @@ function setupNotifications() {
 }
 
 async function initApp() {
-  // Show UI shell immediately (no route yet — currentUser unknown)
   qs('#page-auth').classList.add('hidden');
   qs('#page-app').classList.remove('hidden');
 
-  // Get session BEFORE calling route() so requireAuth() has currentUser
   try {
     const { data: { session } } = await sb.auth.getSession();
     if (session) {
@@ -1467,7 +1632,6 @@ async function initApp() {
     currentUser = null;
   }
 
-  // Now route() knows about currentUser
   updateAuthUI();
   setComposeAvatar();
   if (!location.hash || location.hash === '#' || location.hash === '#/') location.hash = '#/feed';
@@ -1522,7 +1686,7 @@ async function ensureProfile() {
         tries++;
         uname = base + tries;
       }
-      await sb.from('profiles').upsert({ id: currentUser.id, username: uname });
+      await sb.from('profiles').upsert({ id: currentUser.id, username: uname, display_name: uname });
       const { data: fresh } = await sb.from('profiles').select('*').eq('id', currentUser.id).single();
       data = fresh;
     }
