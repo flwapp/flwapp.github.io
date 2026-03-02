@@ -15,6 +15,15 @@ let realtimeSub = null;
 let replyTargetPostId = null;
 let quoteTargetPost = null;
 
+const icons = {
+  like: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>',
+  fire: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.56 2.75c4.37 6.03 6.02 9.42 8.03 17.72m2.54-15.6c3.72 4.35 4.4 8.15 5.15 17.99M19.79 22.75c-1.25.75-9.36.75-10.61 0"/></svg>',
+  follow: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/><line x1="12" y1="12" x2="12" y2="18"/><line x1="9" y1="15" x2="15" y2="15"/></svg>',
+  repost: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>',
+  comment: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
+  mention: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="8"/><path d="M8 19c1.5 2.5 4 2.5 8 0"/></svg>',
+};
+
 const qs  = (s, ctx = document) => ctx.querySelector(s);
 const qsa = (s, ctx = document) => Array.from(ctx.querySelectorAll(s));
 
@@ -25,7 +34,7 @@ function esc(str) {
 
 function linkify(text) {
   return esc(text)
-    .replace(/#(\w+)/g, '<a href="#/explore?tag=$1">#$1</a>')
+    .replace(/#(\w+)/g, '<a href="#/explore/$1" class="tag-link">#$1</a>')
     .replace(/@(\w+)/g, '<a href="#/profile/$1">@$1</a>');
 }
 
@@ -57,6 +66,14 @@ function isAdmin() {
   return currentProfile?.username === 'flow';
 }
 
+function isSystemAccount() {
+  return currentProfile?.username === 'noreply';
+}
+
+function canPinPosts(profile) {
+  return profile?.username === 'flow';
+}
+
 function badgesFor(profile) {
   if (!profile) return '';
   let b = '';
@@ -81,6 +98,7 @@ function setBtn(btn, loading, text) {
 
 function init() {
   setupAuth();
+  setupLoginPage();
   setupCompose();
   setupReplyModal();
   setupQuoteModal();
@@ -94,7 +112,29 @@ function route() {
   const page = parts[0] || 'feed';
   const sub  = parts[1] || '';
 
-  const navRoutes = ['feed','explore','notifications','bookmarks','settings'];
+  if (page === 'login') {
+    if (currentUser) {
+      location.hash = '#/feed';
+      return;
+    }
+    qs('#topbar').classList.add('hidden');
+    qs('#sidebar').classList.add('hidden');
+    qs('#right-panel').classList.add('hidden');
+    qs('.bottom-nav').classList.add('hidden');
+    qsa('.route-view').forEach(v => v.classList.add('hidden'));
+    qs('#view-login').classList.remove('hidden');
+    return;
+  }
+
+  if (!currentUser) {
+    location.hash = '#/login';
+    return;
+  }
+
+  qs('#topbar').classList.remove('hidden');
+  qs('.bottom-nav').classList.remove('hidden');
+
+  const navRoutes = ['feed','explore','notifications','bookmarks','settings','chats'];
   const isTopLevel = navRoutes.includes(page) || (page === 'profile' && !sub);
   qs('#back-btn').classList.toggle('hidden', isTopLevel);
 
@@ -102,7 +142,8 @@ function route() {
     const r = el.dataset.route;
     el.classList.toggle('active',
       r === page ||
-      (r === 'profile' && page === 'profile' && !sub)
+      (r === 'profile' && page === 'profile' && !sub) ||
+      (r === 'chats' && (page === 'chat' || page === 'group'))
     );
   });
 
@@ -127,6 +168,18 @@ function route() {
   else if (page === 'settings') {
     if (!requireAuth()) return;
     qs('#view-settings').classList.remove('hidden'); renderSettings();
+  }
+  else if (page === 'chats') {
+    if (!requireAuth()) return;
+    qs('#view-chats').classList.remove('hidden'); renderChats();
+  }
+  else if (page === 'chat') {
+    if (!requireAuth()) return;
+    qs('#view-chat').classList.remove('hidden'); renderChat(sub);
+  }
+  else if (page === 'group') {
+    if (!requireAuth()) return;
+    qs('#view-group').classList.remove('hidden'); renderGroupChat(sub);
   }
   else location.hash = '#/feed';
 }
@@ -170,14 +223,17 @@ function setupAuth() {
 
   qs('#login-form').addEventListener('submit', async e => {
     e.preventDefault();
-    const email = qs('#login-email').value.trim();
+    const username = qs('#login-username').value.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
     const pass  = qs('#login-password').value;
     const errEl = qs('#login-error');
     const btn   = qs('#login-submit');
     errEl.textContent = ''; errEl.className = 'form-msg';
-    if (!email || !pass) { errEl.textContent = 'Enter email and password.'; errEl.className = 'form-msg error'; return; }
+    if (!username || !pass) { errEl.textContent = 'Enter username and password.'; errEl.className = 'form-msg error'; return; }
     setBtn(btn, true, 'Sign in');
+    
+    const email = `${username}@flowapp.net`;
     const { data, error } = await sb.auth.signInWithPassword({ email, password: pass });
+    
     setBtn(btn, false, 'Sign in');
     if (error) {
       errEl.textContent = error.message;
@@ -200,19 +256,22 @@ function setupAuth() {
   qs('#register-form').addEventListener('submit', async e => {
     e.preventDefault();
     const username = qs('#reg-username').value.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
-    const email    = qs('#reg-email').value.trim();
     const pass     = qs('#reg-password').value;
     const errEl    = qs('#reg-error');
     const btn      = qs('#reg-submit');
     errEl.textContent = ''; errEl.className = 'form-msg';
     if (!username || username.length < 3) { errEl.textContent = 'Username must be 3+ characters.'; errEl.className = 'form-msg error'; return; }
-    if (!email) { errEl.textContent = 'Email is required.'; errEl.className = 'form-msg error'; return; }
     if (pass.length < 8) { errEl.textContent = 'Password must be 8+ characters.'; errEl.className = 'form-msg error'; return; }
+    
+    const email = `${username}@flowapp.net`;
+    
     setBtn(btn, true, 'Create account');
-    const { error } = await sb.auth.signUp({ email, password: pass, options: { data: { username } } });
+    const { data: authData, error } = await sb.auth.signUp({ email, password: pass, options: { data: { username } } });
     setBtn(btn, false, 'Create account');
     if (error) { errEl.textContent = error.message; errEl.className = 'form-msg error'; }
-    else { errEl.textContent = 'Check your email to confirm, then sign in!'; errEl.className = 'form-msg success'; }
+    else {
+      errEl.textContent = 'Account created! Sign in with your username.'; errEl.className = 'form-msg success';
+    }
   });
 
   qs('#logout-btn').addEventListener('click', () => {
@@ -227,6 +286,102 @@ function setupAuth() {
   qs('#new-post-btn').addEventListener('click', () => { if (!requireAuth()) return; qs('#compose-modal').classList.add('open'); setComposeAvatar(); });
   qs('#back-btn').addEventListener('click', () => history.back());
   qs('#notif-btn').addEventListener('click', () => { if (!requireAuth()) return; location.hash = '#/notifications'; });
+}
+
+function setupLoginPage() {
+  qsa('.login-tab').forEach(t => t.addEventListener('click', () => {
+    const tabName = t.dataset.tab === 'login-tab' ? 'login-page' : 'register-page';
+    qsa('.login-tab').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    qsa('.login-form').forEach(f => f.classList.remove('active'));
+    qs(`#${tabName}-form`).classList.add('active');
+  }));
+
+  let usernameDebounce;
+  qs('#register-page-username').addEventListener('input', function() {
+    const currentVal = this.value;
+    const filteredVal = currentVal.toLowerCase().replace(/[^a-z0-9_]/g, '');
+    if (currentVal !== filteredVal) this.value = filteredVal;
+    const hint = qs('#register-page-username-hint');
+    clearTimeout(usernameDebounce);
+    if (filteredVal.length < 3) {
+      hint.textContent = filteredVal.length ? 'Too short (min 3 chars)' : '';
+      hint.style.color = 'var(--red)';
+      return;
+    }
+    hint.textContent = 'Checking…';
+    hint.style.color = 'var(--muted2)';
+    usernameDebounce = setTimeout(async () => {
+      if (qs('#register-page-username').value !== filteredVal) return;
+      try {
+        const controller = new AbortController();
+        const t = setTimeout(() => controller.abort(), 3000);
+        const { data, error } = await sb.from('profiles').select('id').eq('username', filteredVal).maybeSingle().abortSignal(controller.signal);
+        clearTimeout(t);
+        if (qs('#register-page-username').value !== filteredVal) return;
+        if (error || data === undefined) { hint.textContent = ''; return; }
+        hint.textContent = data ? 'Already taken' : 'Available ✓';
+        hint.style.color = data ? 'var(--red)' : 'var(--green)';
+      } catch { hint.textContent = ''; }
+    }, 500);
+  });
+
+  qs('#login-page-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const username = qs('#login-page-username').value.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
+    const pass  = qs('#login-page-password').value;
+    const errEl = qs('#login-page-error');
+    const btn   = qs('#login-page-submit');
+    errEl.textContent = ''; errEl.className = 'form-msg';
+    if (!username || !pass) { errEl.textContent = 'Enter username and password.'; errEl.className = 'form-msg error'; return; }
+    setBtn(btn, true, 'Sign in');
+    
+    const email = `${username}@flowapp.net`;
+    const { data, error } = await sb.auth.signInWithPassword({ email, password: pass });
+    
+    setBtn(btn, false, 'Sign in');
+    if (error) {
+      errEl.textContent = error.message;
+      errEl.className = 'form-msg error';
+    } else if (data?.session) {
+      currentUser = data.session.user;
+      await ensureProfile();
+      updateAuthUI();
+      setComposeAvatar();
+      location.hash = '#/feed';
+      route();
+      loadNotifCount();
+      loadRightPanel();
+      subscribeRealtime();
+    }
+  });
+
+  qs('#register-page-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const username = qs('#register-page-username').value.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
+    const pass     = qs('#register-page-password').value;
+    const errEl    = qs('#register-page-error');
+    const btn      = qs('#register-page-submit');
+    errEl.textContent = ''; errEl.className = 'form-msg';
+    if (!username || username.length < 3) { errEl.textContent = 'Username must be 3+ characters.'; errEl.className = 'form-msg error'; return; }
+    if (pass.length < 8) { errEl.textContent = 'Password must be 8+ characters.'; errEl.className = 'form-msg error'; return; }
+    
+    const email = `${username}@flowapp.net`;
+    
+    setBtn(btn, true, 'Create account');
+    const { data: authData, error } = await sb.auth.signUp({ email, password: pass, options: { data: { username } } });
+    setBtn(btn, false, 'Create account');
+    if (error) { errEl.textContent = error.message; errEl.className = 'form-msg error'; }
+    else {
+      errEl.textContent = 'Account created! Sign in with your username.'; errEl.className = 'form-msg success';
+      setTimeout(() => {
+        qs('#register-page-form').reset();
+        qs('#login-page-username').focus();
+        const loginTab = qsa('.login-tab')[0];
+        loginTab.click();
+      }, 1500);
+    }
+  });
 }
 
 async function renderFeed() {
@@ -263,7 +418,6 @@ async function renderFeed() {
   view.dataset.loaded = 'true';
 }
 
-// ── Algorithm scoring (TikTok/Twitter style) ────────────
 function scorePost(post, followingIds = [], seenIds = new Set()) {
   const now = Date.now();
   const ageMs = now - new Date(post.created_at).getTime();
@@ -275,24 +429,18 @@ function scorePost(post, followingIds = [], seenIds = new Set()) {
   const comments  = post.comment_count || 0;
   const views     = post.view_count || 0;
 
-  // engagement score
   let score = likes * 3 + reposts * 5 + bookmarks * 4 + comments * 2 + views * 0.1;
 
-  // media boost — visual content gets more reach
   if (post.post_type === 'image') score *= 1.4;
   if (post.post_type === 'video') score *= 1.7;
 
-  // freshness decay — older posts lose rank (half-life ~12h like Twitter)
   const decay = Math.pow(0.5, ageHours / 12);
   score *= decay;
 
-  // following boost — posts from people you follow rank higher
   if (followingIds.includes(post.user_id)) score *= 1.6;
 
-  // already seen penalty
   if (seenIds.has(post.id)) score *= 0.1;
 
-  // tiny random noise — prevents identical ranking every reload (TikTok does this)
   score *= (0.85 + Math.random() * 0.3);
 
   return score;
@@ -306,7 +454,7 @@ async function loadFeedPosts(tab) {
   let query = sb.from('posts')
     .select('id, content, post_type, media_url, media_type, created_at, user_id, view_count, quote_of, profiles(id, username, avatar_url, display_name, verified), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)')
     .is('reply_to', null)
-    .limit(80); // fetch more so algorithm has more to pick from
+    .limit(80);
 
   if (tab === 'following') {
     if (!currentUser) { list.innerHTML = emptyState('Sign in to see posts from people you follow.'); return; }
@@ -315,7 +463,6 @@ async function loadFeedPosts(tab) {
     if (!ids.length) { list.innerHTML = emptyState('Follow people to see their posts here.'); return; }
     query = query.in('user_id', ids).order('created_at', { ascending: false });
   } else {
-    // For you: recent window (last 7 days) so algorithm has fresh content
     const weekAgo = new Date(Date.now() - 7 * 24 * 3_600_000).toISOString();
     query = query.gte('created_at', weekAgo).order('created_at', { ascending: false });
   }
@@ -324,23 +471,19 @@ async function loadFeedPosts(tab) {
   if (error) { list.innerHTML = emptyState('Error loading feed.'); return; }
   if (!data?.length) { list.innerHTML = emptyState(tab === 'following' ? 'Nothing here yet.' : 'Be the first to Flow!'); return; }
 
-  // Get following IDs for boost calculation
   let followingIds = [];
   if (currentUser && tab === 'for-you') {
     const { data: follows } = await sb.from('follows').select('following_id').eq('follower_id', currentUser.id);
     followingIds = (follows || []).map(f => f.following_id);
   }
 
-  // Score and sort
   const seenIds = new Set(JSON.parse(sessionStorage.getItem('flow_seen') || '[]'));
   const scored = data
     .map(p => ({ post: p, score: scorePost(p, followingIds, seenIds) }))
     .sort((a, b) => b.score - a.score);
 
-  // Show top 40 ranked posts
   const ranked = scored.slice(0, 40).map(s => s.post);
 
-  // Track seen posts this session
   ranked.forEach(p => seenIds.add(p.id));
   try { sessionStorage.setItem('flow_seen', JSON.stringify([...seenIds].slice(-200))); } catch {}
 
@@ -391,6 +534,8 @@ function postCardHTML(post, quotedPost = null) {
 
   const displayName = p.display_name || p.username;
   const canDelete = isOwn || isAdmin();
+  const canPin = isAdmin();
+  const isPinned = post.is_pinned ? 'pinned' : '';
 
   return `
     <article class="post-card" data-post-id="${post.id}">
@@ -403,11 +548,17 @@ function postCardHTML(post, quotedPost = null) {
             <span class="post-dot">·</span>
             <span class="post-time">${timeAgo(post.created_at)}</span>
             ${typeBadge}
+            ${isPinned ? '<span class="post-type-badge" style="color:var(--yellow)">📌</span>' : ''}
           </span>
         </div>
-        ${canDelete ? `<button class="delete-btn" data-post-id="${post.id}" title="Delete post">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
-        </button>` : ''}
+        <div style="display:flex;gap:4px">
+          ${canPin ? `<button class="delete-btn pin-btn" data-post-id="${post.id}" title="Pin/Unpin post" style="color:${post.is_pinned ? 'var(--yellow)' : 'var(--muted)'}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4v7H4v2h10v7l5-8-5-8Z"/></svg>
+          </button>` : ''}
+          ${canDelete ? `<button class="delete-btn" data-post-id="${post.id}" title="Delete post">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+          </button>` : ''}
+        </div>
       </div>
       ${contentHtml}
       ${mediaHtml}
@@ -498,13 +649,26 @@ function copyLink(postId) {
 }
 
 async function deletePost(postId, btn) {
-  if (!confirm('Delete this post?')) return;
-  btn.disabled = true;
-  let query = sb.from('posts').delete().eq('id', postId);
-  if (!isAdmin()) query = query.eq('user_id', currentUser.id);
-  await query;
-  btn.closest('.post-card')?.remove();
-  showToast('Deleted.');
+  showConfirmModal({
+    title: 'Delete post',
+    message: 'Are you sure? This cannot be undone.',
+    confirmText: 'Delete',
+    confirmClass: 'btn-danger',
+    danger: true,
+    onConfirm: async () => {
+      btn.disabled = true;
+      let query = sb.from('posts').delete().eq('id', postId);
+      if (!isAdmin()) query = query.eq('user_id', currentUser.id);
+      const { error } = await query;
+      if (error) {
+        showToast('Error deleting post: ' + error.message, 'error');
+        btn.disabled = false;
+        return;
+      }
+      btn.closest('.post-card')?.remove();
+      showToast('Deleted.');
+    }
+  });
 }
 
 async function sendNotification(postId, type) {
@@ -528,6 +692,21 @@ function subscribeRealtime() {
     })
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'notifications' }, (payload) => {
       if (payload.new.user_id === currentUser.id) loadNotifCount();
+    })
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'conversations' }, (payload) => {
+      const h = location.hash.replace(/^#\/?/,'');
+      if (h.startsWith('chats') || h === 'messages') {
+        loadChatTab('dms');
+      }
+    })
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (payload) => {
+      const h = location.hash.replace(/^#\/?/,'');
+      if (h.startsWith('chat/')) {
+        const convId = h.replace('chat/', '');
+        if (String(payload.new.conversation_id) === String(convId)) {
+          loadChatMessages(convId);
+        }
+      }
     })
     .subscribe();
 }
@@ -560,6 +739,7 @@ async function renderExplore(sub) {
     <div id="explore-tabs" class="feed-tabs" style="border-bottom:1px solid var(--border)">
       <button class="feed-tab active" data-etab="users">People</button>
       <button class="feed-tab" data-etab="posts">Posts</button>
+      <button class="feed-tab" data-etab="groups">Groups</button>
     </div>
     <div id="explore-results"></div>`;
 
@@ -569,7 +749,8 @@ async function renderExplore(sub) {
     const el = qs('#explore-results');
     el.innerHTML = '<div class="full-loader"><div class="spinner"></div></div>';
     if (etab === 'users') await searchUsers(q, el);
-    else await searchPosts(q, el);
+    else if (etab === 'posts') await searchPosts(q, el);
+    else await searchGroups(q, el);
   };
 
   qsa('[data-etab]', view).forEach(t => t.addEventListener('click', () => {
@@ -649,36 +830,51 @@ async function renderNotifications() {
     <div class="view-header"><h1 class="view-title">Notifications</h1></div>
     <div class="notif-list" id="notif-list"><div class="full-loader"><div class="spinner"></div></div></div>`;
 
-  const { data } = await sb.from('notifications')
-    .select('*, actor:profiles!notifications_actor_id_fkey(username, avatar_url)')
-    .eq('user_id', currentUser.id)
-    .order('created_at', { ascending: false })
-    .limit(40);
+  try {
+    const { data, error } = await sb.from('notifications')
+      .select('id, user_id, actor_id, type, post_id, created_at, read, actor:profiles!notifications_actor_id_fkey(username, avatar_url)')
+      .eq('user_id', currentUser.id)
+      .order('created_at', { ascending: false })
+      .limit(50);
 
-  await sb.from('notifications').update({ read: true }).eq('user_id', currentUser.id).eq('read', false);
-  qs('#notif-badge')?.classList.add('hidden');
-  qs('#sidebar-notif-badge')?.classList.add('hidden');
+    if (error) throw error;
 
-  const list = qs('#notif-list');
-  if (!data?.length) { list.innerHTML = emptyState('No notifications yet.'); return; }
+    sb.from('notifications').update({ read: true }).eq('user_id', currentUser.id).eq('read', false).then();
+    qs('#notif-badge')?.classList.add('hidden');
+    qs('#sidebar-notif-badge')?.classList.add('hidden');
 
-  const msgs  = { like: 'liked your post', fire: 'reacted to your post', follow: 'followed you', repost: 'reposted your post', comment: 'replied to your post', mention: 'mentioned you' };
+    const list = qs('#notif-list');
+    if (!data?.length) { list.innerHTML = emptyState('No notifications yet.'); return; }
 
-  list.innerHTML = data.map(n => `
-    <div class="notif-item ${n.read?'':'unread'}" data-post-id="${n.post_id||''}">
-      <div class="notif-icon">${icons[n.type]||'🔔'}</div>
-      <div style="flex:1;min-width:0">
-        <div class="notif-text">
-          <a href="#/profile/${esc(n.actor?.username)}" class="notif-user"><strong>@${esc(n.actor?.username)}</strong></a>
-          ${msgs[n.type]||n.type}
+    const msgs  = { like: 'liked your post', fire: 'reacted to your post', follow: 'followed you', repost: 'reposted your post', comment: 'replied to your post', mention: 'mentioned you' };
+
+    list.innerHTML = data.map(n => `
+      <div class="notif-item ${n.read?'':'unread'}" data-post-id="${n.post_id||''}" style="cursor:pointer">
+        <div class="notif-icon" style="color:var(--blue);flex-shrink:0;width:20px;height:20px">${icons[n.type]||'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>'}</div>
+        <div style="flex:1;min-width:0">
+          <div class="notif-text">
+            <a href="#/profile/${esc(n.actor?.username)}" class="notif-user" onclick="event.stopPropagation()"><strong>@${esc(n.actor?.username)}</strong></a>
+            ${msgs[n.type]||n.type}
+          </div>
+          <div class="notif-time">${timeAgo(n.created_at)}</div>
         </div>
-        <div class="notif-time">${timeAgo(n.created_at)}</div>
-      </div>
-    </div>`).join('');
+      </div>`).join('');
 
-  qsa('.notif-item[data-post-id]', list).forEach(el => {
-    el.addEventListener('click', () => { if (el.dataset.postId) location.hash = `#/post/${el.dataset.postId}`; });
-  });
+    qsa('.notif-item[data-post-id]', list).forEach(el => {
+      el.addEventListener('click', () => { if (el.dataset.postId) location.hash = `#/post/${el.dataset.postId}`; });
+    });
+    qsa('.notif-item:not([data-post-id])', list).forEach(el => {
+      el.addEventListener('click', (e) => {
+        if (!e.target.closest('a')) {
+          const username = el.querySelector('.notif-user')?.textContent.replace('@','');
+          if (username) location.hash = `#/profile/${username}`;
+        }
+      });
+    });
+  } catch (err) {
+    const list = qs('#notif-list');
+    list.innerHTML = emptyState('Unable to load notifications. Please try again.');
+  }
 }
 
 async function renderBookmarks() {
@@ -740,7 +936,10 @@ async function renderProfile(username) {
         <div style="margin-left:auto;display:flex;gap:8px;align-items:flex-start;padding-top:8px">
         ${isOwn
             ? `<button class="btn-sm btn-outline" id="edit-profile-btn">Edit profile</button>`
-            : `<button class="btn-follow ${isFollowing?'following':''}" id="profile-follow-btn" data-uid="${profile.id}">${isFollowing?'Following':'Follow'}</button>`}
+            : `
+              <button class="btn-follow ${isFollowing?'following':''}" id="profile-follow-btn" data-uid="${profile.id}">${isFollowing?'Following':'Follow'}</button>
+              ${(currentUser && profile.allow_messages !== false) ? `<button class="btn-sm btn-outline" id="profile-chat-btn" title="Send message" style="padding:6px 10px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>` : ''}
+            `}
         ${(!isOwn && isAdmin()) ? `
           <div class="admin-menu-wrap" style="position:relative">
             <button class="btn-sm btn-outline" id="admin-menu-btn" title="Admin actions" style="padding:4px 8px">
@@ -807,6 +1006,7 @@ async function renderProfile(username) {
       const sn = qs('#follower-stat .stat-num');
       if (sn) sn.textContent = parseInt(sn.textContent) + (fb.classList.contains('following') ? 1 : -1);
     });
+    qs('#profile-chat-btn')?.addEventListener('click', () => openDM(profile.id));
   }
 
   if (!isOwn && isAdmin()) {
@@ -820,18 +1020,29 @@ async function renderProfile(username) {
 
     qs('#adm-rename')?.addEventListener('click', () => {
       dropdown.classList.add('hidden');
-      const newName = prompt(`Change username for @${profile.username}:`);
-      if (!newName || newName.length < 3) return;
-      const clean = newName.toLowerCase().replace(/[^a-z0-9_]/g, '');
-      if (!clean) return;
-      showConfirmModal({
+      showInputModal({
         title: 'Change username',
-        message: `Change @${profile.username} → @${clean}?`,
+        message: `Enter new username for @${profile.username}:`,
+        inputPlaceholder: 'new username',
+        inputLabel: 'New username',
         confirmText: 'Change',
-        onConfirm: async () => {
-          const { error } = await sb.from('profiles').update({ username: clean }).eq('id', profile.id);
-          if (error) showToast(error.message, 'error');
-          else { showToast(`Username changed to @${clean}`); renderProfile(clean); }
+        minLength: 3,
+        onConfirm: async (newName) => {
+          const clean = newName.toLowerCase().replace(/[^a-z0-9_]/g, '');
+          if (!clean) {
+            showToast('Username can only contain letters, numbers, and underscores', 'error');
+            return;
+          }
+          showConfirmModal({
+            title: 'Confirm username change',
+            message: `Change @${profile.username} → @${clean}?`,
+            confirmText: 'Change',
+            onConfirm: async () => {
+              const { error } = await sb.from('profiles').update({ username: clean }).eq('id', profile.id);
+              if (error) showToast('Error: ' + error.message, 'error');
+              else { showToast(`Username changed to @${clean}`); renderProfile(clean); }
+            }
+          });
         }
       });
     });
@@ -840,7 +1051,7 @@ async function renderProfile(username) {
       dropdown.classList.add('hidden');
       const newVal = !profile.verified;
       const { error } = await sb.from('profiles').update({ verified: newVal }).eq('id', profile.id);
-      if (error) showToast(error.message, 'error');
+      if (error) showToast('Error: ' + error.message, 'error');
       else { showToast(newVal ? 'Checkmark granted ✓' : 'Checkmark removed'); renderProfile(profile.username); }
     });
 
@@ -854,9 +1065,9 @@ async function renderProfile(username) {
         danger: true,
         requireType: 'BAN',
         onConfirm: async () => {
-          await sb.from('profiles').update({ banned: true }).eq('id', profile.id);
-          showToast(`@${profile.username} has been banned.`);
-          location.hash = '#/feed';
+          const { error } = await sb.from('profiles').update({ banned: true }).eq('id', profile.id);
+          if (error) showToast('Error: ' + error.message, 'error');
+          else { showToast(`@${profile.username} has been banned.`); location.hash = '#/feed'; }
         }
       });
     });
@@ -1084,13 +1295,6 @@ async function renderSettings() {
       <div id="change-username-area"></div>
       <div class="settings-row">
         <div class="settings-row-info">
-          <div class="settings-row-label">Email</div>
-          <div class="settings-row-desc">${esc(currentUser.email)}</div>
-        </div>
-        <span class="settings-row-val">Verified</span>
-      </div>
-      <div class="settings-row">
-        <div class="settings-row-info">
           <div class="settings-row-label">Password</div>
           <div class="settings-row-desc">Change your password</div>
         </div>
@@ -1115,6 +1319,16 @@ async function renderSettings() {
         </div>
         <label class="toggle-switch">
           <input type="checkbox" checked id="toggle-explore" />
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-info">
+          <div class="settings-row-label">Allow messages</div>
+          <div class="settings-row-desc">Let others send you direct messages</div>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" ${currentProfile.allow_messages !== false ? 'checked' : ''} id="toggle-messages" />
           <span class="toggle-track"></span>
         </label>
       </div>
@@ -1155,6 +1369,11 @@ async function renderSettings() {
         <button class="btn-danger" id="delete-account-btn">Delete</button>
       </div>
     </div>`;
+
+  qs('#toggle-messages')?.addEventListener('change', async function() {
+    await sb.from('profiles').update({ allow_messages: this.checked }).eq('id', currentUser.id);
+    if (currentProfile) currentProfile.allow_messages = this.checked;
+  });
 
   qs('#settings-logout-btn').addEventListener('click', () => {
     showConfirmModal({
@@ -1228,8 +1447,17 @@ async function renderSettings() {
       requireType: 'DELETE',
       onConfirm: async () => {
         showToast('Deleting account…');
-        await sb.from('profiles').delete().eq('id', currentUser.id);
-        await sb.auth.signOut();
+        try {
+          await sb.from('profiles').delete().eq('id', currentUser.id);
+          await sb.from('posts').delete().eq('user_id', currentUser.id);
+          await sb.from('follows').delete().eq('follower_id', currentUser.id);
+          await sb.from('follows').delete().eq('following_id', currentUser.id);
+          await sb.from('bookmarks').delete().eq('user_id', currentUser.id);
+          await sb.auth.signOut();
+          showToast('Account deleted.');
+        } catch (err) {
+          showToast('Error: ' + err.message, 'error');
+        }
       }
     });
   });
@@ -1264,7 +1492,7 @@ function setupCompose() {
   const openModal = () => { if (!requireAuth()) return; modal.classList.add('open'); setComposeAvatar(); };
   const closeModal = () => { modal.classList.remove('open'); resetCompose(); };
 
-  qs('#bnav-compose-btn').addEventListener('click', openModal);
+  qs('#bnav-compose-btn')?.addEventListener('click', openModal);
   qs('#modal-scrim').addEventListener('click', closeModal);
   qs('#modal-close-btn').addEventListener('click', closeModal);
 
@@ -1619,9 +1847,6 @@ function setupNotifications() {
 }
 
 async function initApp() {
-  qs('#page-auth').classList.add('hidden');
-  qs('#page-app').classList.remove('hidden');
-
   try {
     const { data: { session } } = await sb.auth.getSession();
     if (session) {
@@ -1633,12 +1858,20 @@ async function initApp() {
   }
 
   updateAuthUI();
-  setComposeAvatar();
-  if (!location.hash || location.hash === '#' || location.hash === '#/') location.hash = '#/feed';
-  route();
-  hideLoader();
-
-  if (currentUser) {
+  
+  if (!currentUser) {
+    qs('#page-auth').classList.add('hidden');
+    qs('#page-app').classList.remove('hidden');
+    location.hash = '#/login';
+    route();
+    hideLoader();
+  } else {
+    setComposeAvatar();
+    qs('#page-auth').classList.add('hidden');
+    qs('#page-app').classList.remove('hidden');
+    if (!location.hash || location.hash === '#' || location.hash === '#/' || location.hash === '#/login') location.hash = '#/feed';
+    route();
+    hideLoader();
     loadNotifCount();
     loadRightPanel();
     subscribeRealtime();
@@ -1653,7 +1886,7 @@ async function initApp() {
       setComposeAvatar();
       qs('#page-auth').classList.add('hidden');
       qs('#page-app').classList.remove('hidden');
-      if (!location.hash || location.hash === '#' || location.hash === '#/') location.hash = '#/feed';
+      if (!location.hash || location.hash === '#' || location.hash === '#/' || location.hash === '#/login') location.hash = '#/feed';
       route();
       loadNotifCount();
       loadRightPanel();
@@ -1686,9 +1919,12 @@ async function ensureProfile() {
         tries++;
         uname = base + tries;
       }
-      await sb.from('profiles').upsert({ id: currentUser.id, username: uname, display_name: uname });
+      await sb.from('profiles').upsert({ id: currentUser.id, username: uname, display_name: uname, user_email: currentUser.email });
       const { data: fresh } = await sb.from('profiles').select('*').eq('id', currentUser.id).single();
       data = fresh;
+    } else if (!data.user_email) {
+      await sb.from('profiles').update({ user_email: currentUser.email }).eq('id', currentUser.id);
+      data.user_email = currentUser.email;
     }
     currentProfile = data;
   } catch (e) {
@@ -1702,14 +1938,9 @@ function enterApp() {
   if (!location.hash || location.hash === '#' || location.hash === '#/') location.hash = '#/feed';
 }
 
-function showAuthPage() {
-  qs('#page-auth').classList.remove('hidden');
-  qs('#page-app').classList.add('hidden');
-}
-
 function requireAuth() {
   if (!currentUser) {
-    showAuthPage();
+    location.hash = '#/login';
     return false;
   }
   return true;
@@ -1782,4 +2013,430 @@ function showConfirmModal({ title, message, confirmText = 'Confirm', confirmClas
   });
 }
 
+function showInputModal({ title, message, inputPlaceholder = '', inputLabel = '', confirmText = 'Confirm', onConfirm, minLength = 1 }) {
+  const existing = qs('#custom-input-modal');
+  if (existing) existing.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'custom-input-modal';
+  modal.innerHTML = `
+    <div class="custom-modal-scrim"></div>
+    <div class="custom-modal-box">
+      <h3 class="custom-modal-title">${esc(title)}</h3>
+      <p class="custom-modal-msg">${message}</p>
+      ${inputLabel ? `<label class="custom-modal-label">${esc(inputLabel)}</label>` : ''}
+      <input class="field-input custom-modal-input" id="input-field" type="text" placeholder="${esc(inputPlaceholder)}" autocomplete="off" />
+      <div class="custom-modal-actions">
+        <button class="btn-sm btn-outline" id="input-cancel-btn">Cancel</button>
+        <button class="btn-sm btn-primary" id="input-ok-btn" disabled>${esc(confirmText)}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  requestAnimationFrame(() => modal.classList.add('open'));
+
+  const close = () => { modal.classList.remove('open'); setTimeout(() => modal.remove(), 200); };
+
+  qs('#input-cancel-btn', modal).addEventListener('click', close);
+  qs('.custom-modal-scrim', modal).addEventListener('click', close);
+
+  const input = qs('#input-field', modal);
+  const okBtn = qs('#input-ok-btn', modal);
+
+  input.addEventListener('input', () => {
+    okBtn.disabled = input.value.length < minLength;
+  });
+
+  input.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter' && !okBtn.disabled) {
+      okBtn.click();
+    }
+  });
+
+  okBtn.addEventListener('click', () => {
+    const value = input.value.trim();
+    if (value.length >= minLength) {
+      close();
+      onConfirm(value);
+    }
+  });
+
+  input.focus();
+}
+
 init();
+let activeChatSub = null;
+
+async function compressImage(file, maxPx = 480) {
+  return new Promise(res => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const scale = Math.min(1, maxPx / Math.max(img.width, img.height));
+      const w = Math.round(img.width * scale);
+      const h = Math.round(img.height * scale);
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      canvas.toBlob(blob => res(new File([blob], file.name, { type: 'image/jpeg' })), 'image/jpeg', 0.82);
+    };
+    img.src = url;
+  });
+}
+
+async function openDM(otherUserId) {
+  if (!requireAuth()) return;
+  const uid = currentUser.id;
+  const [a, b] = [uid, otherUserId].sort();
+  let { data: conv } = await sb.from('conversations')
+    .select('id').eq('user1_id', a).eq('user2_id', b).maybeSingle();
+  if (!conv) {
+    const { data: newConv } = await sb.from('conversations')
+      .insert({ user1_id: a, user2_id: b }).select('id').single();
+    conv = newConv;
+  }
+  location.hash = `#/chat/${conv.id}`;
+}
+
+async function renderChats() {
+  if (!requireAuth()) return;
+  const view = qs('#view-chats');
+  view.innerHTML = `
+    <div class="view-header">
+      <h1 class="view-title">Messages</h1>
+    </div>
+    <div id="chat-list-content"><div class="full-loader"><div class="spinner"></div></div></div>`;
+
+  await loadChatTab('dms');
+}
+
+async function loadChatTab(tab) {
+  const el = qs('#chat-list-content');
+  el.innerHTML = '<div class="full-loader"><div class="spinner"></div></div>';
+
+  const { data: convs } = await sb.from('conversations')
+    .select('id, user1_id, user2_id, streak_count, streak_active, last_message_at, messages(content, created_at, sender_id, message_type)')
+    .or(`user1_id.eq.${currentUser.id},user2_id.eq.${currentUser.id}`)
+    .order('last_message_at', { ascending: false });
+
+  if (!convs?.length) { el.innerHTML = '<p style="padding:24px;color:var(--muted2);text-align:center;font-size:.88rem">No conversations yet.<br>Visit someone\'s profile to start chatting.</p>'; return; }
+
+  const otherIds = convs.map(c => c.user1_id === currentUser.id ? c.user2_id : c.user1_id);
+  const { data: profiles } = await sb.from('profiles').select('id, username, display_name, avatar_url, verified').in('id', otherIds);
+  const pmap = Object.fromEntries((profiles||[]).map(p => [p.id, p]));
+
+  el.innerHTML = convs.map(c => {
+    const otherId = c.user1_id === currentUser.id ? c.user2_id : c.user1_id;
+    const other = pmap[otherId] || { username: 'Unknown' };
+    const lastMsg = c.messages?.sort((a,b) => new Date(b.created_at)-new Date(a.created_at))[0];
+    const lastText = lastMsg ? (lastMsg.message_type === 'image' ? '📷 Photo' : lastMsg.content?.slice(0,40)) : 'No messages yet';
+    const streak = c.streak_active && c.streak_count > 0 ? `<span class="streak-badge">🔥 ${c.streak_count}</span>` : '';
+    return `
+      <div class="chat-row" data-conv-id="${c.id}">
+        ${avatarEl(other, 'size-md')}
+        <div class="chat-row-info">
+          <div class="chat-row-top">
+            <span class="chat-row-name">${esc(other.display_name || other.username)}</span>${badgesFor(other)}${streak}
+            <span class="chat-row-time">${lastMsg ? timeAgo(lastMsg.created_at) : ''}</span>
+          </div>
+          <div class="chat-row-preview">${esc(lastText||'')}</div>
+        </div>
+      </div>`;
+  }).join('');
+
+  qsa('.chat-row', el).forEach(r => r.addEventListener('click', () => location.hash = `#/chat/${r.dataset.convId}`));
+}
+
+async function renderChat(convId) {
+  if (!requireAuth()) return;
+  const view = qs('#view-chat');
+
+  const { data: conv } = await sb.from('conversations')
+    .select('id, user1_id, user2_id, streak_count, streak_active, streak_invited_by, streak_accepted')
+    .eq('id', convId).single();
+  if (!conv) { view.innerHTML = '<p style="padding:24px">Conversation not found.</p>'; return; }
+
+  const otherId = conv.user1_id === currentUser.id ? conv.user2_id : conv.user1_id;
+  const { data: other } = await sb.from('profiles').select('id, username, display_name, avatar_url, verified').eq('id', otherId).single();
+
+  const streakHtml = conv.streak_active && conv.streak_count > 0
+    ? `<span class="streak-badge large">🔥 ${conv.streak_count} day streak</span>`
+    : conv.streak_invited_by && conv.streak_invited_by !== currentUser.id && !conv.streak_accepted
+      ? `<button class="btn-sm btn-streak" id="accept-streak-btn">🔥 Accept streak invite</button>`
+      : conv.streak_invited_by === currentUser.id && !conv.streak_accepted
+        ? `<span style="font-size:.75rem;color:var(--muted2)">🔥 Streak invite sent…</span>`
+        : currentUser
+          ? `<button class="btn-sm btn-streak-invite" id="invite-streak-btn">🔥 Start streak</button>`
+          : '';
+
+  view.innerHTML = `
+    <div class="chat-header">
+      <a href="#/profile/${esc(other?.username)}" class="chat-header-user">
+        ${avatarEl(other, 'size-sm')}
+        <span class="chat-header-name">${esc(other?.display_name || other?.username)}</span>${badgesFor(other)}
+      </a>
+      <div class="chat-header-actions">${streakHtml}</div>
+    </div>
+    <div class="chat-messages" id="chat-messages"><div class="full-loader"><div class="spinner"></div></div></div>
+    <div class="chat-composer">
+      <label class="chat-img-btn" title="Send photo">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+        <input type="file" id="chat-img-input" accept="image/*" hidden />
+      </label>
+      <input type="text" id="chat-input" class="chat-input" placeholder="Message…" maxlength="1000" autocomplete="off" />
+      <button class="chat-send-btn" id="chat-send-btn">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+      </button>
+    </div>`;
+
+  await loadChatMessages(convId);
+
+  qs('#accept-streak-btn')?.addEventListener('click', async () => {
+    await sb.from('conversations').update({ streak_accepted: true, streak_active: true, streak_count: 1 }).eq('id', convId);
+    renderChat(convId);
+  });
+  qs('#invite-streak-btn')?.addEventListener('click', async () => {
+    await sb.from('conversations').update({ streak_invited_by: currentUser.id, streak_accepted: false }).eq('id', convId);
+    renderChat(convId);
+  });
+
+  const sendMsg = async (content, type = 'text', mediaUrl = null) => {
+    if (!content && !mediaUrl) return;
+    const input = qs('#chat-input');
+    input.value = '';
+    await sb.from('messages').insert({
+      conversation_id: convId,
+      sender_id: currentUser.id,
+      content: content || null,
+      media_url: mediaUrl,
+      message_type: type
+    });
+    await sb.from('conversations').update({ last_message_at: new Date().toISOString() }).eq('id', convId);
+
+    if (conv.streak_active) {
+      const today = new Date().toDateString();
+      const key = `streak_${convId}`;
+      if (localStorage.getItem(key) !== today) {
+        localStorage.setItem(key, today);
+        await sb.from('conversations').update({ streak_count: (conv.streak_count||0) + 1 }).eq('id', convId);
+      }
+    }
+  };
+
+  qs('#chat-send-btn').addEventListener('click', async () => {
+    const text = qs('#chat-input').value.trim();
+    if (text) await sendMsg(text);
+  });
+  qs('#chat-input').addEventListener('keydown', async e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); const text = qs('#chat-input').value.trim(); if (text) await sendMsg(text); }
+  });
+  qs('#chat-img-input').addEventListener('change', async e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    showToast('Uploading photo…');
+    const compressed = await compressImage(file, 480);
+    const path = `chat/${currentUser.id}/${Date.now()}.jpg`;
+    const { error } = await sb.storage.from('post-images').upload(path, compressed, { contentType: 'image/jpeg', upsert: true });
+    if (error) { showToast('Upload failed', 'error'); return; }
+    const { data: { publicUrl } } = sb.storage.from('post-images').getPublicUrl(path);
+    await sendMsg(null, 'image', publicUrl);
+    e.target.value = '';
+  });
+
+  if (activeChatSub) { activeChatSub.unsubscribe(); activeChatSub = null; }
+  activeChatSub = sb.channel(`chat-${convId}`)
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `conversation_id=eq.${convId}` },
+      () => loadChatMessages(convId))
+    .subscribe();
+}
+
+async function loadChatMessages(convId) {
+  const el = qs('#chat-messages');
+  if (!el) return;
+  const { data: msgs } = await sb.from('messages')
+    .select('id, content, media_url, message_type, sender_id, created_at')
+    .eq('conversation_id', convId)
+    .order('created_at', { ascending: true })
+    .limit(100);
+
+  if (!msgs?.length) { el.innerHTML = '<p style="text-align:center;padding:24px;color:var(--muted2);font-size:.82rem">Say hello 👋</p>'; return; }
+
+  el.innerHTML = msgs.map(m => {
+    const mine = m.sender_id === currentUser.id;
+    const content = m.message_type === 'image'
+      ? `<img src="${esc(m.media_url)}" class="chat-img-msg" loading="lazy" />`
+      : `<span>${esc(m.content)}</span>`;
+    return `<div class="chat-bubble-wrap ${mine?'mine':'theirs'}">
+      <div class="chat-bubble ${mine?'mine':'theirs'}">${content}</div>
+      <span class="bubble-time">${timeAgo(m.created_at)}</span>
+    </div>`;
+  }).join('');
+
+  el.scrollTop = el.scrollHeight;
+}
+
+async function renderGroupChat(groupId) {
+  if (!requireAuth()) return;
+  const view = qs('#view-group');
+
+  const { data: group } = await sb.from('group_chats').select('id, name, created_by').eq('id', groupId).single();
+  if (!group) { view.innerHTML = '<p style="padding:24px">Group not found.</p>'; return; }
+
+  const { data: membership } = await sb.from('group_members').select('id').eq('group_id', groupId).eq('user_id', currentUser.id).maybeSingle();
+  const isMember = !!membership;
+
+  view.innerHTML = `
+    <div class="chat-header">
+      <div class="chat-header-user">
+        <div class="avatar size-sm" style="background:var(--blue);display:flex;align-items:center;justify-content:center;color:#fff">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        </div>
+        <span class="chat-header-name">${esc(group.name)}</span>
+      </div>
+      <div style="display:flex;gap:6px">
+        ${!isMember ? `<button class="btn-sm btn-outline" id="join-group-btn">Join</button>` : ''}
+        ${group.created_by === currentUser.id ? `<button class="btn-sm btn-outline" id="group-settings-btn" style="padding:4px 8px" title="Group settings"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>` : ''}
+      </div>
+    </div>
+    <div class="chat-messages" id="group-messages"><div class="full-loader"><div class="spinner"></div></div></div>
+    ${isMember ? `<div class="chat-composer">
+      <input type="text" id="group-input" class="chat-input" placeholder="Message ${esc(group.name)}…" maxlength="1000" autocomplete="off" />
+      <button class="chat-send-btn" id="group-send-btn">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+      </button>
+    </div>` : `<div style="padding:12px;text-align:center;color:var(--muted2);font-size:.82rem">Join the group to send messages.</div>`}`;
+
+  await loadGroupMessages(groupId);
+
+  qs('#join-group-btn')?.addEventListener('click', async () => {
+    const { data: count } = await sb.from('group_members').select('id', { count: 'exact', head: true }).eq('group_id', groupId);
+    if ((count||0) >= 200) { showToast('Group is full (200 max)', 'error'); return; }
+    await sb.from('group_members').insert({ group_id: groupId, user_id: currentUser.id });
+    renderGroupChat(groupId);
+  });
+
+  const sendGroup = async () => {
+    const text = qs('#group-input')?.value.trim();
+    if (!text) return;
+    qs('#group-input').value = '';
+    await sb.from('group_messages').insert({ group_id: groupId, sender_id: currentUser.id, content: text });
+  };
+  qs('#group-send-btn')?.addEventListener('click', sendGroup);
+  qs('#group-input')?.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendGroup(); } });
+
+  if (activeChatSub) { activeChatSub.unsubscribe(); activeChatSub = null; }
+  activeChatSub = sb.channel(`group-${groupId}`)
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'group_messages', filter: `group_id=eq.${groupId}` },
+      () => loadGroupMessages(groupId))
+    .subscribe();
+}
+
+async function loadGroupMessages(groupId) {
+  const el = qs('#group-messages');
+  if (!el) return;
+  const { data: msgs } = await sb.from('group_messages')
+    .select('id, content, sender_id, created_at, profiles(username, display_name, avatar_url)')
+    .eq('group_id', groupId)
+    .order('created_at', { ascending: true })
+    .limit(100);
+
+  if (!msgs?.length) { el.innerHTML = '<p style="text-align:center;padding:24px;color:var(--muted2);font-size:.82rem">No messages yet. Start the conversation!</p>'; return; }
+
+  el.innerHTML = msgs.map(m => {
+    const mine = m.sender_id === currentUser.id;
+    const name = mine ? '' : `<span class="bubble-sender">${esc(m.profiles?.display_name || m.profiles?.username)}</span>`;
+    return `<div class="chat-bubble-wrap ${mine?'mine':'theirs'}">
+      ${name}
+      <div class="chat-bubble ${mine?'mine':'theirs'}">${esc(m.content)}</div>
+      <span class="bubble-time">${timeAgo(m.created_at)}</span>
+    </div>`;
+  }).join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+async function showCreateGroupModal() {
+  const modal = document.createElement('div');
+  modal.id = 'create-group-modal';
+  modal.innerHTML = `
+    <div class="custom-modal-scrim"></div>
+    <div class="custom-modal-box">
+      <h3 class="custom-modal-title">Create group</h3>
+      <div class="field-group" style="margin-bottom:12px">
+        <label class="field-label">Group name</label>
+        <input class="field-input" id="new-group-name" type="text" placeholder="My group…" maxlength="60" />
+      </div>
+      <div id="create-group-err" class="form-msg error"></div>
+      <div class="custom-modal-actions">
+        <button class="btn-sm btn-outline" id="cgm-cancel">Cancel</button>
+        <button class="btn-sm btn-primary" id="cgm-create">Create</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  requestAnimationFrame(() => modal.classList.add('open'));
+
+  const close = () => { modal.classList.remove('open'); setTimeout(() => modal.remove(), 200); };
+  qs('#cgm-cancel', modal).addEventListener('click', close);
+  qs('.custom-modal-scrim', modal).addEventListener('click', close);
+  qs('#new-group-name', modal).focus();
+
+  qs('#cgm-create', modal).addEventListener('click', async () => {
+    const name = qs('#new-group-name', modal).value.trim();
+    if (!name) { qs('#create-group-err', modal).textContent = 'Enter a group name.'; return; }
+    const { data: group, error } = await sb.from('group_chats').insert({ name, created_by: currentUser.id }).select('id').single();
+    if (error) { qs('#create-group-err', modal).textContent = error.message; return; }
+    await sb.from('group_members').insert({ group_id: group.id, user_id: currentUser.id, role: 'admin' });
+    close();
+    location.hash = `#/group/${group.id}`;
+  });
+}
+
+async function searchGroups(q, el) {
+  let req = sb.from('group_chats').select('id, name, created_by, created_at, group_members(count)');
+  if (q) req = req.ilike('name', `%${q}%`);
+  else req = req.order('created_at', { ascending: false });
+  req = req.limit(30);
+
+  const { data: groups } = await req;
+  if (!groups?.length) { el.innerHTML = emptyState('No groups found.'); return; }
+
+  const myMemberships = new Set();
+  if (currentUser) {
+    const { data: mine } = await sb.from('group_members').select('group_id').eq('user_id', currentUser.id);
+    (mine||[]).forEach(m => myMemberships.add(m.group_id));
+  }
+
+  el.innerHTML = groups.map(g => {
+    const memberCount = g.group_members?.[0]?.count || 0;
+    const isMember = myMemberships.has(g.id);
+    return `
+      <div class="group-row" data-group-id="${g.id}" style="cursor:pointer">
+        <div class="avatar size-md" style="background:var(--blue);display:flex;align-items:center;justify-content:center;color:#fff;flex-shrink:0">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        </div>
+        <div class="user-row-info">
+          <div class="user-row-name">${esc(g.name)}</div>
+          <div class="user-row-bio">${memberCount} member${memberCount!==1?'s':''}</div>
+        </div>
+        ${currentUser ? `<button class="btn-follow ${isMember?'following':''}" data-gid="${g.id}">${isMember?'Joined':'Join'}</button>` : ''}
+      </div>`;
+  }).join('');
+
+  qsa('.group-row', el).forEach(r => r.addEventListener('click', e => {
+    if (e.target.closest('.btn-follow')) return;
+    location.hash = `#/group/${r.dataset.groupId}`;
+  }));
+  qsa('.btn-follow[data-gid]', el).forEach(b => b.addEventListener('click', async e => {
+    e.stopPropagation();
+    if (!requireAuth()) return;
+    const gid = b.dataset.gid;
+    if (b.classList.contains('following')) {
+      await sb.from('group_members').delete().eq('group_id', gid).eq('user_id', currentUser.id);
+      b.classList.remove('following'); b.textContent = 'Join';
+    } else {
+      const { data: cnt } = await sb.from('group_members').select('id', { count: 'exact', head: true }).eq('group_id', gid);
+      if ((cnt||0) >= 200) { showToast('Group is full (200 max)', 'error'); return; }
+      await sb.from('group_members').insert({ group_id: gid, user_id: currentUser.id });
+      b.classList.add('following'); b.textContent = 'Joined';
+    }
+  }));
+}
