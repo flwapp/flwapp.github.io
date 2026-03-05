@@ -15,6 +15,37 @@ let realtimeSub = null;
 let replyTargetPostId = null;
 let quoteTargetPost = null;
 
+const SLOWMODE_MS = 5000;
+const DAILY_POINTS_LIMIT = 200;
+const POINTS_PER_MSG = 5;
+const MIN_MSG_CHARS = 10;
+
+const BOOST_LEVELS = [
+  { level: 0, threshold: 0,     label: '',        color: '' },
+  { level: 1, threshold: 500,   label: 'Level 1', color: '#4ade80' },
+  { level: 2, threshold: 2000,  label: 'Level 2', color: '#60a5fa' },
+  { level: 3, threshold: 5000,  label: 'Level 3', color: '#a78bfa' },
+  { level: 4, threshold: 15000, label: 'Level 4', color: '#f59e0b' },
+];
+
+const BADGE_CATALOG = [
+  { id: 'circle',   price: 100,   symbol: '●', color: 'white', label: 'Circle' },
+  { id: 'square',   price: 100,   symbol: '■', color: 'white', label: 'Square' },
+  { id: 'diamond',  price: 200,   symbol: '◆', color: 'white', label: 'Diamond' },
+  { id: 'star',     price: 300,   symbol: '★', color: 'white', label: 'Star' },
+  { id: 'triangle', price: 300,   symbol: '▲', color: 'white', label: 'Triangle' },
+  { id: 'heart',    price: 500,   symbol: '♥', color: 'blue',  label: 'Heart' },
+  { id: 'bolt',     price: 500,   symbol: '⚡', color: 'blue',  label: 'Lightning' },
+  { id: 'clover',   price: 1000,  symbol: '♣', color: 'blue',  label: 'Clover' },
+  { id: 'gem',      price: 2000,  symbol: '◈', color: 'blue',  label: 'Gem' },
+  { id: 'shield',   price: 3000,  symbol: '⛨', color: 'blue',  label: 'Shield' },
+  { id: 'sword',    price: 5000,  symbol: '⚔', color: 'blue',  label: 'Crossed Swords' },
+  { id: 'fleur',    price: 7500,  symbol: '⚜', color: 'blue',  label: 'Fleur-de-lis' },
+  { id: 'crown',    price: 10000, symbol: '♛', color: 'blue',  label: 'Crown' },
+];
+
+const _discLastSend = {};
+
 function getOrCreateDeviceId() {
   let deviceId = localStorage.getItem('flow_device_id');
   if (!deviceId) {
@@ -92,6 +123,10 @@ function badgesFor(profile) {
   let b = '';
   if (profile.username === 'flow' || profile.verified)
     b += `<img class="verified-badge" src="https://img.icons8.com/fluency/96/instagram-verification-badge.png" title="${profile.username === 'flow' ? 'Admin' : 'Verified'}" />`;
+  if (profile.equipped_badge) {
+    const badge = BADGE_CATALOG.find(x => x.id === profile.equipped_badge);
+    if (badge) b += `<span class="user-badge ${badge.color === 'blue' ? 'badge-blue' : 'badge-white'}" title="${esc(badge.label)}">${badge.symbol}</span>`;
+  }
   return b;
 }
 
@@ -124,6 +159,7 @@ function route() {
   const parts = hash.split('/').filter(Boolean);
   const page = parts[0] || 'feed';
   const sub  = parts[1] || '';
+  const sub2 = parts[2] || '';
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
 
   if (page === 'login') {
@@ -148,7 +184,7 @@ function route() {
   qs('#topbar').classList.remove('hidden');
   qs('.bottom-nav').classList.remove('hidden');
 
-  const navRoutes = ['feed','explore','notifications','bookmarks','settings','chats'];
+  const navRoutes = ['feed','explore','notifications','bookmarks','settings','chats','communities','marketplace'];
   const isTopLevel = navRoutes.includes(page) || (page === 'profile' && !sub);
   qs('#back-btn').classList.toggle('hidden', isTopLevel);
 
@@ -157,7 +193,8 @@ function route() {
     el.classList.toggle('active',
       r === page ||
       (r === 'profile' && page === 'profile' && !sub) ||
-      (r === 'chats' && (page === 'chat' || page === 'group'))
+      (r === 'chats' && (page === 'chat' || page === 'group')) ||
+      (r === 'communities' && page === 'c')
     );
   });
 
@@ -194,6 +231,22 @@ function route() {
   else if (page === 'group') {
     if (!requireAuth()) return;
     qs('#view-group').classList.remove('hidden'); renderGroupChat(sub);
+  }
+  else if (page === 'communities') {
+    if (!requireAuth()) return;
+    qs('#view-communities').classList.remove('hidden'); renderCommunities();
+  }
+  else if (page === 'marketplace') {
+    if (!requireAuth()) return;
+    qs('#view-marketplace').classList.remove('hidden'); renderMarketplace();
+  }
+  else if (page === 'c') {
+    if (sub && !sub2) { location.hash = `#/c/${sub}/posts`; return; }
+    if (sub2 === 'post' && parts[3]) {
+      qs('#view-discussion').classList.remove('hidden'); renderDiscussion(sub, parts[3]);
+    } else {
+      qs('#view-community').classList.remove('hidden'); renderCommunity(sub, sub2 || 'posts');
+    }
   }
   else location.hash = '#/feed';
 }
@@ -465,6 +518,7 @@ async function loadFeedPosts(tab) {
   let query = sb.from('posts')
     .select('id, content, post_type, media_url, media_type, created_at, user_id, view_count, quote_of, profiles(id, username, avatar_url, display_name, verified), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)')
     .is('reply_to', null)
+    .is('community_id', null)
     .limit(80);
 
   if (tab === 'following') {
@@ -509,7 +563,8 @@ async function loadFeedPosts(tab) {
   bindPostActions(list);
 }
 
-function postCardHTML(post, quotedPost = null) {
+function postCardHTML(post, quotedPost = null, opts = {}) {
+  const { communityMode = false, communitySlug = '' } = opts;
   const p = post.profiles;
   const likeCount  = (post.reactions || []).filter(r => r.type === 'like').length;
   const reacts     = (post.reactions || []).reduce((acc, r) => { acc[r.type] = (acc[r.type]||0)+1; return acc; }, {});
@@ -548,6 +603,61 @@ function postCardHTML(post, quotedPost = null) {
   const canPin = isAdmin();
   const isPinned = post.is_pinned ? 'pinned' : '';
 
+  const discussionCount = post.discussion_count || 0;
+  const viewCount = post.view_count || 0;
+
+  const communityActions = `
+    <div class="post-actions">
+      <button class="action-btn like-btn ${userLiked ? 'liked' : ''}" data-post-id="${post.id}" title="Like">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="${userLiked ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+        <span class="lc">${likeCount || ''}</span>
+      </button>
+      <button class="action-btn bookmark-btn ${userBookmarked ? 'bookmarked' : ''}" data-post-id="${post.id}" title="Bookmark">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="${userBookmarked ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+      </button>
+      <button class="action-btn share-btn" data-post-id="${post.id}" title="Copy link">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+      </button>
+      <div class="post-actions-right">
+        ${viewCount ? `<span class="post-views-count">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          ${viewCount}
+        </span>` : ''}
+        <a class="action-btn discussion-btn" href="#/c/${communitySlug}/post/${post.id}" title="Discussion">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          ${discussionCount ? `<span class="disc-count">${discussionCount}</span>` : ''}
+        </a>
+      </div>
+    </div>`;
+
+  const regularActions = `
+    <div class="post-actions">
+      <button class="action-btn reply-btn" data-post-id="${post.id}" title="Reply">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      </button>
+      <button class="action-btn repost-btn ${userReposted ? 'reposted' : ''}" data-post-id="${post.id}" title="Repost">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+        <span class="rpc">${repostCount || ''}</span>
+      </button>
+      <button class="action-btn like-btn ${userLiked ? 'liked' : ''}" data-post-id="${post.id}" title="Like">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="${userLiked ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+        <span class="lc">${likeCount || ''}</span>
+        ${topReacts ? `<span style="font-size:.8rem">${topReacts}</span>` : ''}
+      </button>
+      <button class="action-btn bookmark-btn ${userBookmarked ? 'bookmarked' : ''}" data-post-id="${post.id}" title="Bookmark">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="${userBookmarked ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+      </button>
+      <button class="action-btn share-btn" data-post-id="${post.id}" title="Copy link">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+      </button>
+      <button class="action-btn quote-btn" data-post-id="${post.id}" title="Quote post">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/><path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/></svg>
+      </button>
+      ${currentUser ? `<button class="action-btn report-btn" data-post-id="${post.id}" title="Report post" style="margin-left:auto">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v2m0 4v2m1.71-16.04l8.14 14.88c.04.06.07.14.07.22a2 2 0 0 1-2 2H4.16a2 2 0 0 1-2-2c0-.08.03-.16.07-.22l8.14-14.88a2 2 0 0 1 3.46 0z"/></svg>
+      </button>` : ''}
+    </div>`;
+
   return `
     <article class="post-card" data-post-id="${post.id}">
       <div class="post-head">
@@ -578,32 +688,7 @@ function postCardHTML(post, quotedPost = null) {
       ${contentHtml}
       ${mediaHtml}
       ${quoteHtml}
-      <div class="post-actions">
-        <button class="action-btn reply-btn" data-post-id="${post.id}" title="Reply">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-        </button>
-        <button class="action-btn repost-btn ${userReposted ? 'reposted' : ''}" data-post-id="${post.id}" title="Repost">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
-          <span class="rpc">${repostCount || ''}</span>
-        </button>
-        <button class="action-btn like-btn ${userLiked ? 'liked' : ''}" data-post-id="${post.id}" title="Like">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="${userLiked ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
-          <span class="lc">${likeCount || ''}</span>
-          ${topReacts ? `<span style="font-size:.8rem">${topReacts}</span>` : ''}
-        </button>
-        <button class="action-btn bookmark-btn ${userBookmarked ? 'bookmarked' : ''}" data-post-id="${post.id}" title="Bookmark">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="${userBookmarked ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
-        </button>
-        <button class="action-btn share-btn" data-post-id="${post.id}" title="Copy link">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
-        </button>
-        <button class="action-btn quote-btn" data-post-id="${post.id}" title="Quote post">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/><path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/></svg>
-        </button>
-        ${currentUser ? `<button class="action-btn report-btn" data-post-id="${post.id}" title="Report post" style="margin-left:auto">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v2m0 4v2m1.71-16.04l8.14 14.88c.04.06.07.14.07.22a2 2 0 0 1-2 2H4.16a2 2 0 0 1-2-2c0-.08.03-.16.07-.22l8.14-14.88a2 2 0 0 1 3.46 0z"/></svg>
-        </button>` : ''}
-      </div>
+      ${communityMode ? communityActions : regularActions}
     </article>`;
 }
 
@@ -1066,7 +1151,7 @@ async function renderExplore(sub, tagParam) {
     <div id="explore-tabs" class="feed-tabs" style="border-bottom:1px solid var(--border)">
       <button class="feed-tab ${tagParam ? '' : 'active'}" data-etab="users">People</button>
       <button class="feed-tab ${tagParam ? 'active' : ''}" data-etab="posts">Posts</button>
-      <button class="feed-tab" data-etab="groups">Groups</button>
+      <button class="feed-tab" data-etab="communities">Communities</button>
     </div>
     <div id="explore-results"></div>`;
 
@@ -1077,7 +1162,7 @@ async function renderExplore(sub, tagParam) {
     el.innerHTML = '<div class="full-loader"><div class="spinner"></div></div>';
     if (etab === 'users') await searchUsers(q, el);
     else if (etab === 'posts') await searchPosts(q, el);
-    else await searchGroups(q, el);
+    else await searchCommunities(q, el);
   };
 
   qsa('[data-etab]', view).forEach(t => t.addEventListener('click', () => {
@@ -2959,4 +3044,1253 @@ async function searchGroups(q, el) {
       b.classList.add('following'); b.textContent = 'Joined';
     }
   }));
+}
+
+async function searchCommunities(q, el) {
+  let req = sb.from('communities')
+    .select('id, name, slug, description, avatar_url, avatar_color, is_private, is_verified, created_at, community_members(count)');
+  if (q) req = req.ilike('name', `%${q}%`).eq('is_private', false);
+  else req = req.eq('is_private', false).order('created_at', { ascending: false });
+  req = req.limit(30);
+
+  const { data: communities } = await req;
+  if (!communities?.length) { el.innerHTML = emptyState('No communities found.'); return; }
+
+  const mySet = new Set();
+  if (currentUser) {
+    const { data: mine } = await sb.from('community_members').select('community_id').eq('user_id', currentUser.id);
+    (mine||[]).forEach(m => mySet.add(m.community_id));
+  }
+
+  el.innerHTML = communities.map(c => {
+    const count = c.community_members?.[0]?.count || 0;
+    const isMember = mySet.has(c.id);
+    return `
+      <div class="community-row" data-slug="${esc(c.slug)}" style="cursor:pointer">
+        <div class="community-row-avatar" style="background:${c.avatar_color || strToColor(c.name)}">
+          ${c.avatar_url ? `<img src="${esc(c.avatar_url)}" alt="" />` : esc(c.name[0].toUpperCase())}
+        </div>
+        <div class="user-row-info">
+          <div class="user-row-name">${esc(c.name)}${c.is_verified ? ' <span class="comm-verified-badge">✓</span>' : ''}</div>
+          <div class="user-row-bio">${count} member${count!==1?'s':''} ${c.description ? '· ' + esc(c.description.slice(0,50)) : ''}</div>
+        </div>
+        ${currentUser ? `<button class="btn-follow ${isMember?'following':''}" data-cid="${c.id}">${isMember?'Joined':'Join'}</button>` : ''}
+      </div>`;
+  }).join('');
+
+  qsa('.community-row', el).forEach(r => r.addEventListener('click', e => {
+    if (e.target.closest('.btn-follow')) return;
+    location.hash = `#/c/${r.dataset.slug}`;
+  }));
+
+  qsa('.btn-follow[data-cid]', el).forEach(b => b.addEventListener('click', async e => {
+    e.stopPropagation();
+    if (!requireAuth()) return;
+    const cid = b.dataset.cid;
+    if (b.classList.contains('following')) {
+      await sb.from('community_members').delete().eq('community_id', cid).eq('user_id', currentUser.id);
+      b.classList.remove('following'); b.textContent = 'Join';
+    } else {
+      await sb.from('community_members').insert({ community_id: cid, user_id: currentUser.id, role: 'member' });
+      b.classList.add('following'); b.textContent = 'Joined';
+    }
+  }));
+}
+
+async function renderCommunities() {
+  const view = qs('#view-communities');
+  view.innerHTML = `
+    <div class="view-header">
+      <h1 class="view-title">Communities</h1>
+      <button class="btn-sm btn-primary" id="create-community-btn">+ Create</button>
+    </div>
+    <div id="my-communities-list"><div class="full-loader"><div class="spinner"></div></div></div>`;
+
+  qs('#create-community-btn').addEventListener('click', () => showCreateCommunityModal());
+
+  const { data: memberships } = await sb.from('community_members')
+    .select('role, communities(id, name, slug, description, avatar_url, avatar_color, is_private, community_members(count))')
+    .eq('user_id', currentUser.id)
+    .order('created_at', { ascending: false });
+
+  const el = qs('#my-communities-list');
+  if (!memberships?.length) {
+    el.innerHTML = `${emptyState('You haven\'t joined any communities yet.')}
+      <div style="text-align:center;margin-top:8px">
+        <a href="#/explore" style="color:var(--blue);font-size:.88rem">Explore communities</a>
+      </div>`;
+    return;
+  }
+
+  el.innerHTML = memberships.map(m => {
+    const c = m.communities;
+    if (!c) return '';
+    const count = c.community_members?.[0]?.count || 0;
+    const roleLabel = m.role === 'owner' ? '<span class="comm-role-badge owner">Owner</span>'
+      : m.role === 'admin' ? '<span class="comm-role-badge admin">Admin</span>' : '';
+    return `
+      <div class="community-card" onclick="location.hash='#/c/${esc(c.slug)}'">
+        <div class="community-card-avatar" style="background:${c.avatar_color || strToColor(c.name)}">
+          ${c.avatar_url ? `<img src="${esc(c.avatar_url)}" alt="" />` : esc(c.name[0].toUpperCase())}
+        </div>
+        <div class="community-card-info">
+          <div class="community-card-name">${esc(c.name)} ${c.is_private ? '<span class="comm-private-badge">Private</span>' : ''} ${roleLabel}</div>
+          <div class="community-card-meta">${count} member${count!==1?'s':''} ${c.description ? '· ' + esc(c.description.slice(0,60)) : ''}</div>
+        </div>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </div>`;
+  }).join('');
+}
+
+async function renderCommunity(slug, activeTab = 'posts') {
+  const view = qs('#view-community');
+  view.innerHTML = '<div class="full-loader"><div class="spinner"></div></div>';
+  if (!slug) { view.innerHTML = emptyState('Community not found.'); return; }
+
+  const { data: community, error } = await sb.from('communities')
+    .select('*, community_members(count)')
+    .eq('slug', slug)
+    .single();
+
+  if (error || !community) { view.innerHTML = emptyState('Community not found.'); return; }
+
+  let myRole = null;
+  if (currentUser) {
+    const { data: mem } = await sb.from('community_members')
+      .select('role').eq('community_id', community.id).eq('user_id', currentUser.id).maybeSingle();
+    myRole = mem?.role || null;
+  }
+
+  const { data: boostData } = await sb.from('community_boost_funds')
+    .select('total_points, level').eq('community_id', community.id).maybeSingle();
+  const boostTotal = boostData?.total_points || 0;
+  const boostLevel = BOOST_LEVELS.reduce((cur, lvl) => boostTotal >= lvl.threshold ? lvl : cur, BOOST_LEVELS[0]);
+
+  const isMember = !!myRole;
+  const isOwner = myRole === 'owner';
+  const isAdmin = myRole === 'admin' || isOwner;
+  const memberCount = community.community_members?.[0]?.count || 0;
+
+  const canPost = isOwner || isAdmin;
+
+  view.innerHTML = `
+    <div class="community-scroll-area">
+      ${!isMember ? `<div class="comm-guest-banner">You're in preview mode. Join this community to become a member!</div>` : ''}
+      <div class="community-hero">
+        <div class="community-cover" id="comm-cover-el" style="${community.cover_url ? `background-image:url('${esc(community.cover_url)}');background-size:cover;background-position:center` : `background:${community.cover_color || strToColor(community.name)}`}">
+          ${isOwner ? `<button class="comm-edit-btn" id="comm-cover-edit-btn" title="Edit banner" style="position:absolute;bottom:10px;right:12px">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+          </button>` : ''}
+        </div>
+        <div class="community-hero-body">
+          <div class="community-avatar-wrap">
+            <div class="community-avatar" id="comm-avatar-el" style="background:${community.avatar_color || strToColor(community.name)}">
+              ${community.avatar_url ? `<img src="${esc(community.avatar_url)}" alt="" id="comm-avatar-img" />` : `<span id="comm-avatar-letter">${esc(community.name[0].toUpperCase())}</span>`}
+            </div>
+            ${isOwner ? `<label class="comm-edit-btn comm-avatar-edit-btn" title="Change avatar image">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+              <input type="file" id="community-avatar-upload" accept="image/jpeg,image/png,image/webp" hidden />
+            </label>` : ''}
+          </div>
+          <div class="community-hero-info">
+            <div class="community-hero-name">
+              ${esc(community.name)}
+              ${community.is_private ? '<span class="comm-private-badge">Private</span>' : ''}
+              ${community.is_verified ? '<span class="comm-verified-badge" title="Verified community">✓</span>' : ''}
+              ${boostLevel.level > 0 ? `<span class="comm-boost-badge" style="color:${boostLevel.color}" title="Boost ${boostLevel.label}">⚡ ${boostLevel.label}</span>` : ''}
+            </div>
+            <div class="community-hero-slug">c/${esc(community.slug)}</div>
+            ${community.description ? `<div class="community-hero-desc">${esc(community.description)}</div>` : ''}
+            <div class="community-hero-stats">
+              <span id="comm-member-count">${memberCount}</span> member${memberCount!==1?'s':''}
+            </div>
+          </div>
+          <div class="community-hero-actions">
+            ${currentUser ? (isMember
+              ? `${isOwner ? `<button class="btn-sm btn-outline" id="comm-settings-btn">Settings</button>` : ''}
+                 <button class="btn-sm btn-outline comm-boost-btn" id="comm-boost-btn" title="Boost community">⚡ Boost</button>
+                 <button class="btn-sm btn-outline" id="comm-leave-btn">Leave</button>`
+              : `<button class="btn-sm comm-join-btn" id="comm-join-btn">Join</button>`
+            ) : ''}
+            ${currentProfile?.username === 'artur' ? `<button class="icon-btn" id="comm-artur-btn" title="Moderator options" style="margin-left:4px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="19" r="1" fill="currentColor"/></svg></button>` : ''}
+          </div>
+        </div>
+      </div>
+      <div class="community-tabs">
+        <a href="#/c/${esc(community.slug)}/posts" class="community-tab ${activeTab === 'posts' ? 'active' : ''}">Posts</a>
+        <a href="#/c/${esc(community.slug)}/members" class="community-tab ${activeTab === 'members' ? 'active' : ''}">Members</a>
+      </div>
+      <div id="community-content">
+        <div class="post-list" id="community-posts"><div class="full-loader"><div class="spinner"></div></div></div>
+      </div>
+    </div>
+    ${canPost ? `
+    <div id="community-compose-bar">
+      ${avatarEl(currentProfile,'size-sm')}
+      <button id="open-comm-compose">What's on your mind?</button>
+    </div>` : ''}`;
+
+  if (activeTab === 'members') await loadCommunityMembers(community.id, isAdmin);
+  else await loadCommunityPosts(community.id, community.slug);
+
+  qsa('.community-tab', view).forEach(t => t.addEventListener('click', e => e.stopPropagation()));
+
+  qs('#comm-join-btn')?.addEventListener('click', async () => {
+    await sb.from('community_members').insert({ community_id: community.id, user_id: currentUser.id, role: 'member' });
+    showToast('Joined!');
+    renderCommunity(slug, activeTab);
+  });
+
+  qs('#comm-leave-btn')?.addEventListener('click', () => {
+    showConfirmModal({
+      title: 'Leave community',
+      message: `Leave <strong>${esc(community.name)}</strong>?`,
+      confirmText: 'Leave',
+      onConfirm: async () => {
+        await sb.from('community_members').delete().eq('community_id', community.id).eq('user_id', currentUser.id);
+        showToast('Left community.');
+        renderCommunity(slug, activeTab);
+      }
+    });
+  });
+
+  qs('#comm-settings-btn')?.addEventListener('click', () => showCommunitySettings(community, slug));
+  qs('#open-comm-compose')?.addEventListener('click', () => showCommunityComposeModal(community));
+
+  qs('#comm-boost-btn')?.addEventListener('click', () => showBoostModal(community, boostTotal, boostLevel));
+
+  qs('#comm-artur-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const existing = qs('#artur-comm-menu');
+    if (existing) { existing.remove(); return; }
+    const menu = document.createElement('div');
+    menu.id = 'artur-comm-menu';
+    menu.style.cssText = 'position:fixed;z-index:9999;background:var(--surface2);border:1px solid var(--border2);border-radius:10px;padding:4px;min-width:180px;box-shadow:0 8px 24px rgba(0,0,0,.4)';
+    const isVerified = community.is_verified;
+    menu.innerHTML = `<button class="dctx-item" id="artur-verify-btn">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+      ${isVerified ? 'Remove verification' : 'Verify community'}
+    </button>`;
+    document.body.appendChild(menu);
+    const btn = qs('#comm-artur-btn');
+    const rect = btn.getBoundingClientRect();
+    menu.style.top = `${rect.bottom + 6}px`;
+    menu.style.right = `${window.innerWidth - rect.right}px`;
+    const close = () => { menu.remove(); document.removeEventListener('click', close); };
+    setTimeout(() => document.addEventListener('click', close), 50);
+    qs('#artur-verify-btn', menu).addEventListener('click', async () => {
+      close();
+      const newVal = !isVerified;
+      const { error } = await sb.from('communities').update({ is_verified: newVal }).eq('id', community.id);
+      if (error) { showToast('Error updating community', 'error'); return; }
+      showToast(newVal ? 'Community verified! ✓' : 'Verification removed.');
+      renderCommunity(slug, activeTab);
+    });
+  });
+
+  qs('#comm-cover-edit-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    showColorImagePopup({
+      anchor: qs('#comm-cover-edit-btn'),
+      currentColor: community.cover_color || strToColor(community.name),
+      onColor: async (color) => {
+        await sb.from('communities').update({ cover_color: color, cover_url: null }).eq('id', community.id);
+        community.cover_color = color; community.cover_url = null;
+        const coverEl = qs('#comm-cover-el');
+        if (coverEl) { coverEl.style.backgroundImage = ''; coverEl.style.background = color; }
+        if (!community.avatar_url) {
+          await sb.from('communities').update({ avatar_color: color }).eq('id', community.id);
+          community.avatar_color = color;
+          const avatarEl = qs('#comm-avatar-el');
+          if (avatarEl) avatarEl.style.background = color;
+        }
+      },
+      onImage: async (file) => {
+        showToast('Uploading…');
+        const url = await uploadFile(file, 'avatars', 'community-covers');
+        await sb.from('communities').update({ cover_url: url }).eq('id', community.id);
+        community.cover_url = url;
+        const coverEl = qs('#comm-cover-el');
+        if (coverEl) { coverEl.style.backgroundImage = `url('${url}')`; coverEl.style.backgroundSize = 'cover'; coverEl.style.backgroundPosition = 'center'; }
+        showToast('Banner updated!');
+      }
+    });
+  });
+
+  qs('#community-avatar-upload')?.addEventListener('change', async function() {
+    const file = this.files[0]; if (!file) return;
+    showToast('Uploading…');
+    const url = await uploadFile(file, 'avatars', 'communities');
+    await sb.from('communities').update({ avatar_url: url }).eq('id', community.id);
+    community.avatar_url = url;
+    const el = qs('#comm-avatar-el');
+    if (el) el.innerHTML = `<img src="${url}" alt="" style="width:100%;height:100%;object-fit:cover" />`;
+    showToast('Avatar updated!');
+  });
+}
+
+async function loadCommunityPosts(communityId, communitySlug = '') {
+  const el = qs('#community-posts');
+  if (!el) return;
+  el.innerHTML = '<div class="full-loader"><div class="spinner"></div></div>';
+
+  const { data, error } = await sb.from('posts')
+    .select('id, content, post_type, media_url, media_type, created_at, user_id, view_count, quote_of, profiles(id, username, avatar_url, display_name, verified), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)')
+    .eq('community_id', communityId)
+    .is('reply_to', null)
+    .order('created_at', { ascending: false })
+    .limit(40);
+
+  if (error) { el.innerHTML = emptyState('Error loading posts.'); return; }
+  if (!data?.length) { el.innerHTML = emptyState('No posts yet. Be the first!'); return; }
+
+  const postIds = data.map(p => p.id);
+  let discCounts = {};
+  const { data: dc } = await sb.from('post_discussions')
+    .select('post_id')
+    .in('post_id', postIds);
+  if (dc) dc.forEach(r => { discCounts[r.post_id] = (discCounts[r.post_id] || 0) + 1; });
+  data.forEach(p => { p.discussion_count = discCounts[p.id] || 0; });
+
+  const quoteIds = data.filter(p => p.quote_of).map(p => p.quote_of);
+  let quotedPosts = {};
+  if (quoteIds.length) {
+    const { data: qd } = await sb.from('posts').select('id, content, post_type, profiles(username, avatar_url)').in('id', quoteIds);
+    if (qd) qd.forEach(q => quotedPosts[q.id] = q);
+  }
+
+  el.innerHTML = data.map(p => postCardHTML(p, quotedPosts[p.quote_of], { communityMode: true, communitySlug })).join('');
+  bindPostActions(el);
+}
+
+async function loadCommunityMembers(communityId, isAdmin) {
+  const el = qs('#community-content');
+  el.innerHTML = '<div class="full-loader"><div class="spinner"></div></div>';
+
+  const { data } = await sb.from('community_members')
+    .select('role, user_id, created_at, profiles(id, username, avatar_url, display_name, verified)')
+    .eq('community_id', communityId)
+    .order('created_at', { ascending: true });
+
+  if (!data?.length) { el.innerHTML = emptyState('No members yet.'); return; }
+
+  const roleOrder = { owner: 0, admin: 1, member: 2 };
+  data.sort((a, b) => {
+    const ro = (roleOrder[a.role] ?? 2) - (roleOrder[b.role] ?? 2);
+    if (ro !== 0) return ro;
+    return new Date(a.created_at) - new Date(b.created_at);
+  });
+
+  el.innerHTML = `<div class="post-list">` + data.map(m => {
+    const p = m.profiles;
+    if (!p) return '';
+    const roleLabel = m.role === 'owner'
+      ? '<span class="comm-role-badge owner">Owner</span>'
+      : m.role === 'admin' ? '<span class="comm-role-badge admin">Admin</span>' : '';
+    const canManage = isAdmin && m.role !== 'owner' && p.id !== currentUser?.id;
+    return `
+      <div class="user-row" style="cursor:pointer" onclick="location.hash='#/profile/${esc(p.username)}'">
+        ${avatarEl(p, 'size-md')}
+        <div class="user-row-info">
+          <div class="user-row-name">@${esc(p.username)} ${badgesFor(p)} ${roleLabel}</div>
+          ${p.display_name ? `<div class="user-row-bio">${esc(p.display_name)}</div>` : ''}
+        </div>
+        ${canManage ? `<button class="btn-sm btn-outline comm-manage-btn" data-uid="${p.id}" data-role="${m.role}" onclick="event.stopPropagation();openMemberManageMenu(this,'${communityId}','${p.username}')">Manage</button>` : ''}
+      </div>`;
+  }).join('') + '</div>';
+}
+
+async function openMemberManageMenu(btn, communityId, username) {
+  const existing = qs('#member-manage-menu');
+  if (existing) { existing.remove(); return; }
+
+  const { data: mem } = await sb.from('community_members')
+    .select('role, user_id').eq('community_id', communityId).eq('user_id', btn.dataset.uid).single();
+  if (!mem) return;
+
+  const myRole = btn.dataset.role;
+  const menu = document.createElement('div');
+  menu.id = 'member-manage-menu';
+  menu.style.cssText = `position:absolute;right:16px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:4px;z-index:200;min-width:160px;box-shadow:0 8px 24px rgba(0,0,0,.3)`;
+
+  const actions = [];
+  if (myRole !== 'admin') {
+    actions.push({ label: 'Make admin', fn: async () => {
+      await sb.from('community_members').update({ role: 'admin' }).eq('community_id', communityId).eq('user_id', mem.user_id);
+      showToast(`@${username} is now an admin.`); menu.remove(); loadCommunityMembers(communityId, true);
+    }});
+  } else {
+    actions.push({ label: 'Remove admin', fn: async () => {
+      await sb.from('community_members').update({ role: 'member' }).eq('community_id', communityId).eq('user_id', mem.user_id);
+      showToast(`@${username} is now a member.`); menu.remove(); loadCommunityMembers(communityId, true);
+    }});
+  }
+  actions.push({ label: 'Remove from community', danger: true, fn: () => {
+    showConfirmModal({
+      title: 'Remove member',
+      message: `Remove <strong>@${esc(username)}</strong> from this community?`,
+      confirmText: 'Remove',
+      confirmClass: 'btn-danger',
+      onConfirm: async () => {
+        await sb.from('community_members').delete().eq('community_id', communityId).eq('user_id', mem.user_id);
+        showToast(`@${username} removed.`); menu.remove(); loadCommunityMembers(communityId, true);
+      }
+    });
+  }});
+
+  menu.innerHTML = actions.map((a, i) => `<button class="admin-drop-item ${a.danger?'danger':''}" data-idx="${i}">${esc(a.label)}</button>`).join('');
+  document.body.appendChild(menu);
+  const rect = btn.getBoundingClientRect();
+  menu.style.top = `${rect.bottom + window.scrollY + 4}px`;
+  menu.style.right = `${window.innerWidth - rect.right}px`;
+  menu.style.position = 'fixed';
+  menu.style.top = `${rect.bottom + 4}px`;
+
+  qsa('[data-idx]', menu).forEach(b => b.addEventListener('click', () => actions[+b.dataset.idx].fn()));
+  setTimeout(() => document.addEventListener('click', () => menu.remove(), { once: true }), 50);
+}
+
+function showCommunitySettings(community, slug) {
+  const modal = document.createElement('div');
+  modal.id = 'community-settings-modal';
+  modal.innerHTML = `
+    <div class="custom-modal-scrim"></div>
+    <div class="custom-modal-box" style="max-width:440px">
+      <h3 class="custom-modal-title">Community Settings</h3>
+      <div class="field-group">
+        <label class="field-label">Name</label>
+        <input class="field-input" id="cs-name" type="text" value="${esc(community.name)}" maxlength="60" />
+      </div>
+      <div class="field-group">
+        <label class="field-label">Description</label>
+        <textarea class="field-input" id="cs-desc" rows="2" maxlength="200" placeholder="Describe your community…">${esc(community.description||'')}</textarea>
+      </div>
+      <div class="settings-row" style="padding:8px 0">
+        <div class="settings-row-info">
+          <div class="settings-row-label">Private community</div>
+          <div class="settings-row-desc">Won't appear in search</div>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="cs-private" ${community.is_private ? 'checked' : ''} />
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+      <div id="cs-err" class="form-msg error"></div>
+      <div class="custom-modal-actions">
+        <button class="btn-sm btn-outline btn-danger" id="cs-delete">Delete community</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn-sm btn-outline" id="cs-cancel">Cancel</button>
+          <button class="btn-sm btn-primary" id="cs-save">Save</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  requestAnimationFrame(() => modal.classList.add('open'));
+
+  const close = () => { modal.classList.remove('open'); setTimeout(() => modal.remove(), 200); };
+  qs('#cs-cancel', modal).addEventListener('click', close);
+  qs('.custom-modal-scrim', modal).addEventListener('click', close);
+
+  qs('#cs-save', modal).addEventListener('click', async () => {
+    const name = qs('#cs-name', modal).value.trim();
+    const desc = qs('#cs-desc', modal).value.trim();
+    const isPrivate = qs('#cs-private', modal).checked;
+    const err = qs('#cs-err', modal);
+    if (!name) { err.textContent = 'Name is required.'; return; }
+    const { error } = await sb.from('communities').update({ name, description: desc||null, is_private: isPrivate }).eq('id', community.id);
+    if (error) { err.textContent = error.message; return; }
+    showToast('Settings saved!');
+    close();
+    renderCommunity(slug, activeTab);
+  });
+
+  qs('#cs-delete', modal).addEventListener('click', () => {
+    close();
+    showConfirmModal({
+      title: 'Delete community',
+      message: `Permanently delete <strong>${esc(community.name)}</strong>? All posts will be removed.`,
+      confirmText: 'Delete',
+      confirmClass: 'btn-danger',
+      danger: true,
+      requireType: 'DELETE',
+      onConfirm: async () => {
+        await sb.from('communities').delete().eq('id', community.id);
+        showToast('Community deleted.');
+        location.hash = '#/communities';
+      }
+    });
+  });
+}
+
+function showCommunityComposeModal(community) {
+  const modal = document.createElement('div');
+  modal.id = 'community-compose-modal';
+  modal.className = 'modal';
+  modal.innerHTML = `
+    <div class="modal-scrim" id="cc-scrim"></div>
+    <div class="modal-sheet compose-sheet">
+      <div class="modal-handle"></div>
+      <div class="modal-head">
+        <h2 class="modal-title">Post in ${esc(community.name)}</h2>
+        <button class="icon-btn" id="cc-close">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="compose-types" id="cc-types">
+        <button class="ctype-btn active" data-type="text">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="17" y1="10" x2="3" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="17" y1="18" x2="3" y2="18"/></svg>
+          Text
+        </button>
+        <button class="ctype-btn" data-type="image">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+          Image
+        </button>
+        <button class="ctype-btn" data-type="video">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+          Video
+        </button>
+        <button class="ctype-btn" data-type="markdown">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
+          Markdown
+        </button>
+      </div>
+      <form id="cc-form" novalidate>
+        <div class="compose-body">
+          ${avatarEl(currentProfile, 'size-md')}
+          <div class="compose-right">
+            <textarea id="cc-text" placeholder="What's on your mind?" maxlength="2000" rows="4"></textarea>
+            <div class="compose-counter"><span id="cc-count">0</span>/2000</div>
+            <div id="cc-image-area" class="compose-media-area hidden">
+              <label class="media-upload-zone" id="cc-image-zone">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                <span>Click or drag to add image</span>
+                <input type="file" id="cc-img-input" accept="image/jpeg,image/png,image/gif,image/webp" hidden />
+              </label>
+              <div id="cc-img-preview" class="compose-media-preview hidden">
+                <img id="cc-img-el" src="" alt="" />
+                <button type="button" class="media-remove-btn" id="cc-img-remove">×</button>
+              </div>
+            </div>
+            <div id="cc-video-area" class="compose-media-area hidden">
+              <label class="media-upload-zone" id="cc-video-zone">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+                <span>Click to upload video (max 50MB)</span>
+                <input type="file" id="cc-video-input" accept="video/mp4,video/webm,video/mov" hidden />
+              </label>
+              <div id="cc-video-preview" class="compose-media-preview hidden">
+                <video id="cc-video-el" controls></video>
+                <button type="button" class="media-remove-btn" id="cc-video-remove">×</button>
+              </div>
+            </div>
+            <div id="cc-md-toolbar" class="md-toolbar hidden">
+              <button type="button" class="md-tool" data-md="**bold**"><b>B</b></button>
+              <button type="button" class="md-tool" data-md="*italic*"><i>I</i></button>
+              <button type="button" class="md-tool" data-md="\`code\`"><code>&lt;/&gt;</code></button>
+              <button type="button" class="md-tool" data-md="# ">H</button>
+              <button type="button" class="md-tool" data-md="- ">—</button>
+              <button type="button" class="md-tool" data-md="> ">"</button>
+              <div class="md-sep"></div>
+              <button type="button" class="md-preview-toggle" id="cc-md-preview-toggle">Preview</button>
+            </div>
+            <div id="cc-md-preview" class="md-preview hidden"></div>
+          </div>
+        </div>
+        <div class="compose-toolbar">
+          <div id="cc-error" class="compose-err"></div>
+          <button type="submit" class="btn-post" id="cc-submit">Post</button>
+        </div>
+      </form>
+    </div>`;
+  document.body.appendChild(modal);
+  requestAnimationFrame(() => modal.classList.add('open'));
+
+  let currentType = 'text';
+  let imageFile = null;
+  let videoFile = null;
+
+  const close = () => { modal.classList.remove('open'); setTimeout(() => modal.remove(), 200); };
+  qs('#cc-scrim', modal).addEventListener('click', close);
+  qs('#cc-close', modal).addEventListener('click', close);
+  qs('#cc-text', modal).addEventListener('input', function() { qs('#cc-count', modal).textContent = this.value.length; });
+
+  qsa('.ctype-btn', modal).forEach(btn => btn.addEventListener('click', () => {
+    currentType = btn.dataset.type;
+    qsa('.ctype-btn', modal).forEach(b => b.classList.toggle('active', b === btn));
+    qs('#cc-image-area', modal).classList.toggle('hidden', currentType !== 'image');
+    qs('#cc-video-area', modal).classList.toggle('hidden', currentType !== 'video');
+    qs('#cc-md-toolbar', modal).classList.toggle('hidden', currentType !== 'markdown');
+    qs('#cc-md-preview', modal).classList.add('hidden');
+    qs('#cc-text', modal).classList.remove('hidden');
+    qs('#cc-md-preview-toggle', modal).textContent = 'Preview';
+    qs('#cc-text', modal).placeholder = currentType === 'markdown' ? 'Write markdown…' : 'What\'s on your mind?';
+  }));
+
+  qs('#cc-img-input', modal).addEventListener('change', function() {
+    const file = this.files[0]; if (!file) return;
+    imageFile = file;
+    const url = URL.createObjectURL(file);
+    qs('#cc-img-el', modal).src = url;
+    qs('#cc-img-preview', modal).classList.remove('hidden');
+    qs('#cc-image-zone', modal).classList.add('hidden');
+  });
+  qs('#cc-img-remove', modal).addEventListener('click', () => {
+    imageFile = null;
+    qs('#cc-img-el', modal).src = '';
+    qs('#cc-img-preview', modal).classList.add('hidden');
+    qs('#cc-image-zone', modal).classList.remove('hidden');
+  });
+
+  qs('#cc-video-input', modal).addEventListener('change', function() {
+    const file = this.files[0]; if (!file) return;
+    if (file.size > 50 * 1024 * 1024) { showToast('Video must be under 50MB', 'error'); return; }
+    videoFile = file;
+    const url = URL.createObjectURL(file);
+    qs('#cc-video-el', modal).src = url;
+    qs('#cc-video-preview', modal).classList.remove('hidden');
+    qs('#cc-video-zone', modal).classList.add('hidden');
+  });
+  qs('#cc-video-remove', modal).addEventListener('click', () => {
+    videoFile = null;
+    qs('#cc-video-el', modal).src = '';
+    qs('#cc-video-preview', modal).classList.add('hidden');
+    qs('#cc-video-zone', modal).classList.remove('hidden');
+  });
+
+  qsa('.md-tool', modal).forEach(btn => btn.addEventListener('click', () => {
+    const ta = qs('#cc-text', modal);
+    const ins = btn.dataset.md;
+    const start = ta.selectionStart, end = ta.selectionEnd;
+    ta.value = ta.value.slice(0, start) + ins + ta.value.slice(end);
+    ta.focus();
+    ta.selectionStart = ta.selectionEnd = start + ins.length;
+    qs('#cc-count', modal).textContent = ta.value.length;
+  }));
+
+  qs('#cc-md-preview-toggle', modal).addEventListener('click', () => {
+    const prev = qs('#cc-md-preview', modal);
+    const ta = qs('#cc-text', modal);
+    const showing = !prev.classList.contains('hidden');
+    prev.classList.toggle('hidden', showing);
+    ta.classList.toggle('hidden', !showing);
+    if (!showing) prev.innerHTML = marked.parse(ta.value || '_Nothing to preview_');
+    qs('#cc-md-preview-toggle', modal).textContent = showing ? 'Preview' : 'Edit';
+  });
+
+  qs('#cc-form', modal).addEventListener('submit', async e => {
+    e.preventDefault();
+    const content = qs('#cc-text', modal).value.trim();
+    const errEl = qs('#cc-error', modal);
+    const btn = qs('#cc-submit', modal);
+    errEl.textContent = '';
+    if (currentType === 'image' && !imageFile && !content) { errEl.textContent = 'Add an image or write something.'; return; }
+    if (currentType === 'video' && !videoFile) { errEl.textContent = 'Select a video first.'; return; }
+    if (currentType !== 'image' && currentType !== 'video' && !content) { errEl.textContent = 'Write something first.'; return; }
+    setBtn(btn, true, 'Posting…');
+    let media_url = null;
+    if (currentType === 'image' && imageFile) {
+      media_url = await uploadFile(imageFile, 'post-media', 'community-images');
+      if (!media_url) { errEl.textContent = 'Image upload failed.'; setBtn(btn, false, 'Post'); return; }
+    }
+    if (currentType === 'video' && videoFile) {
+      media_url = await uploadFile(videoFile, 'post-media', 'community-videos');
+      if (!media_url) { errEl.textContent = 'Video upload failed.'; setBtn(btn, false, 'Post'); return; }
+    }
+    const { error } = await sb.from('posts').insert({
+      user_id: currentUser.id,
+      content: content || '',
+      post_type: currentType,
+      media_url,
+      community_id: community.id
+    });
+    setBtn(btn, false, 'Post');
+    if (error) { errEl.textContent = error.message; return; }
+    close();
+    showToast('Posted!');
+    loadCommunityPosts(community.id, community.slug);
+  });
+}
+
+async function showCreateCommunityModal() {
+  const { data: owned } = await sb.from('communities').select('id').eq('created_by', currentUser.id);
+  const maxCommunities = currentProfile?.verified ? 10 : 3;
+  if ((owned||[]).length >= maxCommunities) {
+    showToast(`You can only create up to ${maxCommunities} communities.`, 'error');
+    return;
+  }
+
+  const modal = document.createElement('div');
+  modal.id = 'create-community-modal';
+  modal.innerHTML = `
+    <div class="custom-modal-scrim"></div>
+    <div class="custom-modal-box" style="max-width:440px">
+      <h3 class="custom-modal-title">Create community</h3>
+      <div class="field-group">
+        <label class="field-label">Name</label>
+        <input class="field-input" id="nc-name" type="text" placeholder="My community" maxlength="60" />
+      </div>
+      <div class="field-group">
+        <label class="field-label">Slug (URL)</label>
+        <div class="input-prefix-wrap">
+          <span class="input-prefix" style="font-size:.8rem">c/</span>
+          <input class="field-input prefixed" id="nc-slug" type="text" placeholder="my-community" maxlength="40" autocorrect="off" autocapitalize="none" />
+        </div>
+        <span class="field-hint" id="nc-slug-hint"></span>
+      </div>
+      <div class="field-group">
+        <label class="field-label">Description <span style="color:var(--muted2);font-weight:400">(optional)</span></label>
+        <textarea class="field-input" id="nc-desc" rows="2" maxlength="200" placeholder="What is this community about?"></textarea>
+      </div>
+      <div class="settings-row" style="padding:8px 0">
+        <div class="settings-row-info">
+          <div class="settings-row-label">Private</div>
+          <div class="settings-row-desc">Won't appear in search</div>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="nc-private" />
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+      <div id="nc-err" class="form-msg error"></div>
+      <div class="custom-modal-actions">
+        <button class="btn-sm btn-outline" id="nc-cancel">Cancel</button>
+        <button class="btn-sm btn-primary" id="nc-create">Create</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  requestAnimationFrame(() => modal.classList.add('open'));
+
+  const close = () => { modal.classList.remove('open'); setTimeout(() => modal.remove(), 200); };
+  qs('#nc-cancel', modal).addEventListener('click', close);
+  qs('.custom-modal-scrim', modal).addEventListener('click', close);
+
+  qs('#nc-name', modal).addEventListener('input', function() {
+    const slugInput = qs('#nc-slug', modal);
+    if (!slugInput._touched) {
+      slugInput.value = this.value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+    }
+  });
+
+  let slugDebounce;
+  qs('#nc-slug', modal).addEventListener('input', function() {
+    this._touched = true;
+    this.value = this.value.toLowerCase().replace(/[^a-z0-9-]/g, '');
+    const hint = qs('#nc-slug-hint', modal);
+    clearTimeout(slugDebounce);
+    if (!this.value) { hint.textContent = ''; return; }
+    hint.textContent = 'Checking…'; hint.style.color = 'var(--muted2)';
+    slugDebounce = setTimeout(async () => {
+      const { data } = await sb.from('communities').select('id').eq('slug', this.value).maybeSingle();
+      hint.textContent = data ? 'Already taken' : 'Available ✓';
+      hint.style.color = data ? 'var(--red)' : 'var(--green)';
+    }, 400);
+  });
+
+  qs('#nc-create', modal).addEventListener('click', async () => {
+    const name = qs('#nc-name', modal).value.trim();
+    const slug = qs('#nc-slug', modal).value.trim();
+    const desc = qs('#nc-desc', modal).value.trim();
+    const isPrivate = qs('#nc-private', modal).checked;
+    const err = qs('#nc-err', modal);
+    err.textContent = '';
+    if (!name) { err.textContent = 'Name is required.'; return; }
+    if (!slug || slug.length < 2) { err.textContent = 'Slug must be at least 2 characters.'; return; }
+
+    const { data: existing } = await sb.from('communities').select('id').eq('slug', slug).maybeSingle();
+    if (existing) { err.textContent = 'This slug is already taken.'; return; }
+
+    const { data: community, error } = await sb.from('communities').insert({
+      name, slug, description: desc||null, is_private: isPrivate, created_by: currentUser.id
+    }).select('id').single();
+
+    if (error) { err.textContent = error.message; return; }
+    await sb.from('community_members').insert({ community_id: community.id, user_id: currentUser.id, role: 'owner' });
+    close();
+    showToast('Community created!');
+    location.hash = `#/c/${slug}`;
+  });
+}
+function showColorImagePopup({ anchor, currentColor, onColor, onImage }) {
+  qs('#color-image-popup')?.remove();
+
+  const PRESETS = [
+    '#e63946','#ff4d6d','#ff6b35','#ff9f1c',
+    '#ffca3a','#8ac926','#2dc653','#06d6a0',
+    '#0096c7','#4361ee','#7209b7','#b5179e',
+    '#f72585','#3a86ff','#00b4d8','#80ffdb',
+  ];
+
+  const popup = document.createElement('div');
+  popup.id = 'color-image-popup';
+  popup.innerHTML = `
+    <div class="cip-grid">
+      ${PRESETS.map(c => `<button class="cip-swatch ${c === currentColor ? 'active' : ''}" data-color="${c}" style="background:${c}" title="${c}"></button>`).join('')}
+    </div>
+    <div class="cip-divider"></div>
+    <div class="cip-actions">
+      <label class="cip-action-btn" title="Upload image">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+        <input type="file" accept="image/jpeg,image/png,image/webp" hidden id="cip-file-input" />
+      </label>
+      <label class="cip-action-btn" title="Custom color">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg>
+        <input type="color" id="cip-color-input" value="${currentColor.startsWith('#') ? currentColor : '#1a1a2e'}" hidden />
+      </label>
+    </div>`;
+
+  document.body.appendChild(popup);
+
+  const rect = anchor.getBoundingClientRect();
+  popup.style.position = 'fixed';
+  popup.style.zIndex = '9999';
+  const pw = 196;
+  let left = rect.right - pw;
+  if (left < 8) left = 8;
+  popup.style.left = `${left}px`;
+  popup.style.top = `${rect.bottom + 6}px`;
+
+  const close = () => { popup.remove(); document.removeEventListener('click', outsideClick); };
+  const outsideClick = (e) => { if (!popup.contains(e.target) && e.target !== anchor) close(); };
+  setTimeout(() => document.addEventListener('click', outsideClick), 50);
+
+  qsa('.cip-swatch', popup).forEach(sw => sw.addEventListener('click', () => {
+    onColor(sw.dataset.color);
+    close();
+  }));
+
+  qs('#cip-color-input', popup).addEventListener('input', function() {
+    onColor(this.value);
+  });
+  qs('#cip-color-input', popup).addEventListener('change', function() {
+    onColor(this.value);
+    close();
+  });
+  qs('label[title="Custom color"]', popup).addEventListener('click', (e) => {
+    e.stopPropagation();
+    qs('#cip-color-input', popup).click();
+  });
+
+  qs('#cip-file-input', popup).addEventListener('change', function() {
+    const file = this.files[0];
+    if (!file) return;
+    onImage(file);
+    close();
+  });
+  qs('label[title="Upload image"]', popup).addEventListener('click', e => e.stopPropagation());
+}
+
+async function renderDiscussion(communitySlug, postId) {
+  const view = qs('#view-discussion');
+  view.innerHTML = '<div class="full-loader"><div class="spinner"></div></div>';
+
+  const [{ data: post }, { data: community }] = await Promise.all([
+    sb.from('posts')
+      .select('id, content, post_type, media_url, created_at, user_id, view_count, profiles(id, username, avatar_url, display_name, verified), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)')
+      .eq('id', postId).single(),
+    sb.from('communities').select('id, name, slug, avatar_url, avatar_color, cover_color').eq('slug', communitySlug).single()
+  ]);
+
+  if (!post || !community) { view.innerHTML = emptyState('Post not found.'); return; }
+
+  const { data: msgs } = await sb.from('post_discussions')
+    .select('id, content, created_at, user_id, reply_to_id, profiles(id, username, avatar_url, display_name, verified, equipped_badge), reply:reply_to_id(id, content, user_id, profiles(username, display_name))')
+    .eq('post_id', postId)
+    .order('created_at', { ascending: true });
+
+  const myRole = currentUser ? (await sb.from('community_members').select('role').eq('community_id', community.id).eq('user_id', currentUser.id).single()).data?.role : null;
+  const isMember = !!myRole;
+
+  const isAdmin = myRole === 'admin' || myRole === 'owner';
+
+  view.innerHTML = `
+    <div class="disc-header">
+      <a href="#/c/${esc(communitySlug)}/posts" class="disc-back">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
+      </a>
+      <div class="disc-header-info">
+        <div class="disc-header-avatar" style="background:${community.avatar_color || strToColor(community.name)}">
+          ${community.avatar_url ? `<img src="${esc(community.avatar_url)}" alt="" />` : esc(community.name[0].toUpperCase())}
+        </div>
+        <span class="disc-header-name">${esc(community.name)}</span>
+      </div>
+    </div>
+    <div class="disc-scroll-area">
+      <div class="disc-post-preview">
+        ${postCardHTML(post, null, { communityMode: true, communitySlug })}
+      </div>
+      <div class="disc-divider">
+        <span>Discussion · ${(msgs||[]).length} message${(msgs||[]).length !== 1 ? 's' : ''}</span>
+      </div>
+      <div class="disc-messages" id="disc-messages">
+        ${(msgs||[]).length ? (msgs||[]).map(m => discMsgHTML(m, isAdmin)).join('') : `<div class="disc-empty">No messages yet. Start the discussion!</div>`}
+      </div>
+    </div>
+    ${isMember ? `
+    <div class="disc-reply-bar" id="disc-reply-bar" style="display:none">
+      <div class="disc-reply-preview">
+        <div class="disc-reply-name" id="disc-reply-name"></div>
+        <div class="disc-reply-text" id="disc-reply-text"></div>
+      </div>
+      <button class="disc-reply-cancel" id="disc-reply-cancel">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="disc-composer" id="disc-composer">
+      ${avatarEl(currentProfile, 'size-sm')}
+      <input class="disc-input" id="disc-input" placeholder="Write a message…" autocomplete="off" maxlength="1000" />
+      <button class="disc-send-btn" id="disc-send-btn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+      </button>
+    </div>` : ''}`;
+
+  bindPostActions(qs('.disc-post-preview', view));
+
+  const scrollEl = qs('.disc-scroll-area', view);
+  scrollEl.scrollTop = scrollEl.scrollHeight;
+
+  const msgsEl = qs('#disc-messages', view);
+  let replyTo = null;
+
+  const showDiscCtxMenu = (e, msgEl) => {
+    e.preventDefault();
+    qs('#disc-ctx-menu')?.remove();
+
+    const msgId = msgEl.dataset.msgId;
+    const msgUserId = msgEl.dataset.userId;
+    const isMine = currentUser?.id === msgUserId;
+    const canDelete = isMine || isAdmin;
+    const canEdit = isMine;
+
+    if (!canDelete && !canEdit) return;
+
+    const menu = document.createElement('div');
+    menu.id = 'disc-ctx-menu';
+    menu.innerHTML = `
+      <button class="dctx-item" data-action="reply">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>
+        Reply
+      </button>
+      ${canEdit ? `<button class="dctx-item" data-action="edit">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+        Edit
+      </button>` : ''}
+      ${canDelete ? `<button class="dctx-item danger" data-action="delete">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+        Delete
+      </button>` : ''}`;
+
+    document.body.appendChild(menu);
+
+    const x = e.clientX ?? (e.touches?.[0]?.clientX ?? 0);
+    const y = e.clientY ?? (e.touches?.[0]?.clientY ?? 0);
+    const mw = 160, mh = menu.offsetHeight || 120;
+    menu.style.left = `${Math.min(x, window.innerWidth - mw - 8)}px`;
+    menu.style.top  = `${Math.min(y, window.innerHeight - mh - 8)}px`;
+
+    const close = () => { menu.remove(); document.removeEventListener('click', close); document.removeEventListener('touchstart', close); };
+    setTimeout(() => { document.addEventListener('click', close); document.addEventListener('touchstart', close); }, 50);
+
+    menu.addEventListener('click', async ev => {
+      const action = ev.target.closest('[data-action]')?.dataset.action;
+      if (!action) return;
+      close();
+
+      if (action === 'reply') {
+        replyTo = {
+          id: msgId,
+          username: msgEl.dataset.username,
+          displayName: msgEl.querySelector('.disc-msg-name')?.textContent?.trim() || msgEl.dataset.username,
+          text: msgEl.querySelector('.disc-bubble')?.textContent?.trim() || ''
+        };
+        const bar = qs('#disc-reply-bar', view);
+        if (bar) {
+          qs('#disc-reply-name', view).textContent = replyTo.displayName;
+          qs('#disc-reply-text', view).textContent = replyTo.text.slice(0, 80) + (replyTo.text.length > 80 ? '…' : '');
+          bar.style.display = 'flex';
+        }
+        qs('#disc-input', view)?.focus();
+      }
+
+      if (action === 'edit') {
+        const bubble = msgEl.querySelector('.disc-bubble');
+        if (!bubble) return;
+        const oldText = bubble.textContent.trim();
+        const inp = document.createElement('input');
+        inp.className = 'disc-input disc-edit-input';
+        inp.value = oldText;
+        bubble.style.display = 'none';
+        bubble.after(inp);
+        inp.focus();
+        inp.select();
+        let committed = false;
+        const commit = async () => {
+          if (committed) return;
+          committed = true;
+          const newText = inp.value.trim();
+          inp.remove();
+          bubble.style.display = '';
+          if (!newText || newText === oldText) return;
+          const { error } = await sb.from('post_discussions').update({ content: newText }).eq('id', msgId);
+          if (error) { showToast('Error editing'); return; }
+          bubble.textContent = newText;
+        };
+        inp.addEventListener('blur', commit);
+        inp.addEventListener('keydown', ke => {
+          if (ke.key === 'Enter') { ke.preventDefault(); inp.blur(); }
+          if (ke.key === 'Escape') { committed = true; inp.remove(); bubble.style.display = ''; }
+        });
+      }
+
+      if (action === 'delete') {
+        const { error } = await sb.from('post_discussions').delete().eq('id', msgId);
+        if (error) { showToast('Error deleting message'); return; }
+        msgEl.remove();
+      }
+    });
+  };
+
+  let touchTimer;
+  msgsEl.addEventListener('contextmenu', e => {
+    const msgEl = e.target.closest('.disc-msg');
+    if (!msgEl) return;
+    showDiscCtxMenu(e, msgEl);
+  });
+  msgsEl.addEventListener('touchstart', e => {
+    const msgEl = e.target.closest('.disc-msg');
+    if (!msgEl) return;
+    touchTimer = setTimeout(() => showDiscCtxMenu(e, msgEl), 500);
+  }, { passive: true });
+  msgsEl.addEventListener('touchend', () => clearTimeout(touchTimer));
+  msgsEl.addEventListener('touchmove', () => clearTimeout(touchTimer));
+
+  const sendBtn = qs('#disc-send-btn', view);
+  const input = qs('#disc-input', view);
+
+  qs('#disc-reply-cancel', view)?.addEventListener('click', () => {
+    replyTo = null;
+    const bar = qs('#disc-reply-bar', view);
+    if (bar) bar.style.display = 'none';
+    input?.focus();
+  });
+
+  if (sendBtn && input) {
+    const send = async () => {
+      const text = input.value.trim(); if (!text) return;
+
+      const now = Date.now();
+      if (_discLastSend[postId] && now - _discLastSend[postId] < SLOWMODE_MS) {
+        const remaining = Math.ceil((SLOWMODE_MS - (now - _discLastSend[postId])) / 1000);
+        showToast(`Slow down! Wait ${remaining}s`, 'error');
+        return;
+      }
+      _discLastSend[postId] = now;
+
+      input.value = '';
+      sendBtn.disabled = true;
+      const payload = { post_id: postId, user_id: currentUser.id, content: text };
+      if (replyTo) payload.reply_to_id = replyTo.id;
+      const replySnapshot = replyTo;
+      replyTo = null;
+      const bar = qs('#disc-reply-bar', view);
+      if (bar) bar.style.display = 'none';
+      const { data: newMsg, error } = await sb.from('post_discussions')
+        .insert(payload)
+        .select('id, content, created_at, user_id, reply_to_id, profiles(id, username, avatar_url, display_name, verified, equipped_badge)')
+        .single();
+      sendBtn.disabled = false;
+      if (error) { showToast('Error sending message'); return; }
+      if (replySnapshot) newMsg._replySnapshot = replySnapshot;
+      const msgsEl = qs('#disc-messages', view);
+      const empty = msgsEl.querySelector('.disc-empty');
+      if (empty) empty.remove();
+      msgsEl.insertAdjacentHTML('beforeend', discMsgHTML(newMsg, isAdmin));
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+
+      if (text.length >= MIN_MSG_CHARS) awardDiscussionPoints(community.id);
+    };
+    sendBtn.addEventListener('click', send);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+  }
+}
+
+function discMsgHTML(m, canModerate = false) {
+  const p = m.profiles;
+  const isMine = currentUser?.id === m.user_id;
+  const reply = m.reply || m._replySnapshot;
+  let replyHtml = '';
+  if (reply) {
+    const rName = reply.displayName || reply.profiles?.display_name || reply.profiles?.username || reply.username || '';
+    const rText = (reply.text || reply.content || '').slice(0, 60);
+    replyHtml = `<div class="disc-reply-quote">
+      <span class="disc-reply-quote-name">${esc(rName)}</span>
+      <span class="disc-reply-quote-text">${esc(rText)}${(reply.text || reply.content || '').length > 60 ? '…' : ''}</span>
+    </div>`;
+  }
+  return `
+    <div class="disc-msg ${isMine ? 'mine' : ''}" data-msg-id="${m.id}" data-user-id="${m.user_id}" data-username="${esc(p.username)}">
+      ${!isMine ? `<a href="#/profile/${esc(p.username)}">${avatarEl(p, 'size-sm')}</a>` : ''}
+      <div class="disc-msg-body">
+        ${!isMine ? `<div class="disc-msg-name">${esc(p.display_name || p.username)}${badgesFor(p)}</div>` : ''}
+        <div class="disc-bubble">${replyHtml}${esc(m.content)}</div>
+        <div class="disc-msg-time">${timeAgo(m.created_at)}</div>
+      </div>
+    </div>`;
+}
+async function awardDiscussionPoints(communityId) {
+  if (!currentUser) return;
+  const { data: comm } = await sb.from('communities').select('is_verified').eq('id', communityId).maybeSingle();
+  if (!comm?.is_verified) return;
+
+  const today = new Date().toISOString().split('T')[0];
+  let { data: pts } = await sb.from('user_points').select('*').eq('user_id', currentUser.id).maybeSingle();
+
+  if (!pts) {
+    await sb.from('user_points').insert({ user_id: currentUser.id, balance: POINTS_PER_MSG, daily_earned: POINTS_PER_MSG, last_earned_date: today });
+    showToast(`+${POINTS_PER_MSG} pts ⭐`);
+    return;
+  }
+
+  const isNewDay = pts.last_earned_date !== today;
+  const daily = isNewDay ? 0 : (pts.daily_earned || 0);
+  if (daily >= DAILY_POINTS_LIMIT) return;
+
+  const newBalance = (pts.balance || 0) + POINTS_PER_MSG;
+  const newDaily = daily + POINTS_PER_MSG;
+  await sb.from('user_points').update({ balance: newBalance, daily_earned: newDaily, last_earned_date: today }).eq('user_id', currentUser.id);
+  showToast(`+${POINTS_PER_MSG} pts ⭐`);
+}
+
+async function renderMarketplace() {
+  const view = qs('#view-marketplace');
+  view.innerHTML = '<div class="full-loader"><div class="spinner"></div></div>';
+  if (!currentUser) { view.innerHTML = emptyState('Sign in to use the marketplace.'); return; }
+
+  const today = new Date().toISOString().split('T')[0];
+  const [{ data: pts }, { data: owned }] = await Promise.all([
+    sb.from('user_points').select('balance, daily_earned, last_earned_date').eq('user_id', currentUser.id).maybeSingle(),
+    sb.from('user_badges').select('badge_id').eq('user_id', currentUser.id)
+  ]);
+
+  const balance = pts?.balance || 0;
+  const dailyEarned = (pts?.last_earned_date === today ? pts?.daily_earned : 0) || 0;
+  const ownedSet = new Set((owned || []).map(b => b.badge_id));
+  const equipped = currentProfile?.equipped_badge || null;
+
+  view.innerHTML = `
+    <div class="view-header"><h1 class="view-title">Marketplace</h1></div>
+    <div class="market-balance-card">
+      <div class="market-balance-label">Your balance</div>
+      <div class="market-balance-amount">${balance.toLocaleString()} <span class="market-pts-unit">pts</span></div>
+      <div class="market-balance-sub">Today: ${dailyEarned} / ${DAILY_POINTS_LIMIT} pts earned</div>
+      <div class="market-balance-hint">Earn ${POINTS_PER_MSG} pts per message (${MIN_MSG_CHARS}+ chars) in verified communities ✓</div>
+    </div>
+    <div class="market-section-title">Badge Shop</div>
+    <div class="market-grid" id="market-grid">
+      ${BADGE_CATALOG.map(badge => {
+        const isOwned = ownedSet.has(badge.id);
+        const isEquipped = equipped === badge.id;
+        const canAfford = balance >= badge.price;
+        return `<div class="market-badge-card ${isOwned ? 'owned' : ''}">
+          <div class="market-badge-symbol ${badge.color === 'blue' ? 'badge-blue' : 'badge-white'}">${badge.symbol}</div>
+          <div class="market-badge-name">${esc(badge.label)}</div>
+          ${isOwned
+            ? `<button class="btn-sm ${isEquipped ? 'btn-primary' : 'btn-outline'} market-action-btn" data-action="${isEquipped ? 'unequip' : 'equip'}" data-id="${badge.id}">${isEquipped ? 'Equipped ✓' : 'Equip'}</button>`
+            : `<div class="market-badge-price">${badge.price.toLocaleString()} pts</div>
+               <button class="btn-sm btn-primary market-action-btn" data-action="buy" data-id="${badge.id}" ${!canAfford ? 'disabled' : ''}>${canAfford ? 'Buy' : 'Need more'}</button>`
+          }
+        </div>`;
+      }).join('')}
+    </div>`;
+
+  qsa('.market-action-btn', view).forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const action = btn.dataset.action;
+      const badgeId = btn.dataset.id;
+      const badge = BADGE_CATALOG.find(b => b.id === badgeId);
+      if (!badge) return;
+
+      if (action === 'buy') {
+        const { data: freshPts } = await sb.from('user_points').select('balance').eq('user_id', currentUser.id).maybeSingle();
+        const freshBalance = freshPts?.balance || 0;
+        if (freshBalance < badge.price) { showToast('Not enough points!', 'error'); return; }
+        btn.disabled = true;
+        const { error } = await sb.from('user_badges').insert({ user_id: currentUser.id, badge_id: badgeId });
+        if (error) { showToast('Error purchasing', 'error'); btn.disabled = false; return; }
+        await sb.from('user_points').update({ balance: freshBalance - badge.price }).eq('user_id', currentUser.id);
+        showToast(`${badge.label} badge purchased!`);
+        renderMarketplace();
+      } else if (action === 'equip') {
+        await sb.from('profiles').update({ equipped_badge: badgeId }).eq('id', currentUser.id);
+        if (currentProfile) currentProfile.equipped_badge = badgeId;
+        showToast(`${badge.label} equipped!`);
+        renderMarketplace();
+      } else if (action === 'unequip') {
+        await sb.from('profiles').update({ equipped_badge: null }).eq('id', currentUser.id);
+        if (currentProfile) currentProfile.equipped_badge = null;
+        showToast('Badge removed.');
+        renderMarketplace();
+      }
+    });
+  });
+}
+
+async function showBoostModal(community, currentTotal, currentLevel) {
+  const modal = document.createElement('div');
+  modal.id = 'boost-modal';
+  modal.innerHTML = `
+    <div class="custom-modal-scrim"></div>
+    <div class="custom-modal-box" style="max-width:400px">
+      <h3 class="custom-modal-title">⚡ Boost Community</h3>
+      <div class="boost-level-track">
+        ${BOOST_LEVELS.filter(l => l.level > 0).map(l => `
+          <div class="boost-level-item ${currentTotal >= l.threshold ? 'reached' : ''}">
+            <span style="color:${l.color}">${l.label}</span>
+            <span class="boost-level-threshold">${l.threshold.toLocaleString()} pts</span>
+          </div>`).join('')}
+      </div>
+      <div class="boost-fund-info">
+        Community fund: <strong>${currentTotal.toLocaleString()} pts</strong>
+        ${currentLevel.level > 0 ? `· <span style="color:${currentLevel.color}">${currentLevel.label} active</span>` : ''}
+      </div>
+      <div class="field-group" style="margin-top:16px">
+        <label class="field-label">Donate points</label>
+        <input class="field-input" type="number" id="boost-amount" min="1" placeholder="e.g. 50" />
+      </div>
+      <div id="boost-err" class="form-msg error"></div>
+      <div class="custom-modal-actions">
+        <button class="btn-sm btn-outline" id="boost-cancel">Cancel</button>
+        <button class="btn-sm btn-primary" id="boost-confirm">⚡ Boost</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  requestAnimationFrame(() => modal.classList.add('open'));
+
+  const close = () => { modal.classList.remove('open'); setTimeout(() => modal.remove(), 200); };
+  qs('.custom-modal-scrim', modal).addEventListener('click', close);
+  qs('#boost-cancel', modal).addEventListener('click', close);
+
+  qs('#boost-confirm', modal).addEventListener('click', async () => {
+    const amount = parseInt(qs('#boost-amount', modal).value, 10);
+    const errEl = qs('#boost-err', modal);
+    errEl.textContent = '';
+    if (!amount || amount < 1) { errEl.textContent = 'Enter a valid amount.'; return; }
+
+    const { data: pts } = await sb.from('user_points').select('balance').eq('user_id', currentUser.id).maybeSingle();
+    const balance = pts?.balance || 0;
+    if (balance < amount) { errEl.textContent = `Not enough points. You have ${balance} pts.`; return; }
+
+    const newBalance = balance - amount;
+    const { data: existing } = await sb.from('community_boost_funds').select('total_points').eq('community_id', community.id).maybeSingle();
+    const newTotal = (existing?.total_points || 0) + amount;
+    const newLevelObj = BOOST_LEVELS.reduce((cur, lvl) => newTotal >= lvl.threshold ? lvl : cur, BOOST_LEVELS[0]);
+
+    await Promise.all([
+      sb.from('user_points').update({ balance: newBalance }).eq('user_id', currentUser.id),
+      sb.from('community_boost_funds').upsert({ community_id: community.id, total_points: newTotal, level: newLevelObj.level })
+    ]);
+
+    close();
+    const lvlMsg = newLevelObj.level > currentLevel.level ? ` Community reached ${newLevelObj.label}! 🎉` : '';
+    showToast(`Donated ${amount} pts to ${community.name}!${lvlMsg}`);
+    renderCommunity(community.slug);
+  });
 }
