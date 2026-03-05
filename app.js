@@ -3071,7 +3071,7 @@ async function searchCommunities(q, el) {
           ${c.avatar_url ? `<img src="${esc(c.avatar_url)}" alt="" />` : esc(c.name[0].toUpperCase())}
         </div>
         <div class="user-row-info">
-          <div class="user-row-name">${esc(c.name)}${c.is_verified ? ' <span class="comm-verified-badge">✓</span>' : ''}</div>
+          <div class="user-row-name">${esc(c.name)}${c.is_verified ? ' <span class="comm-verified-badge"><img src="https://img.icons8.com/color/96/instagram-verification-badge.png" style="height: 1em; vertical-align: middle;"></span>' : ''}</div>
           <div class="user-row-bio">${count} member${count!==1?'s':''} ${c.description ? '· ' + esc(c.description.slice(0,50)) : ''}</div>
         </div>
         ${currentUser ? `<button class="btn-follow ${isMember?'following':''}" data-cid="${c.id}">${isMember?'Joined':'Join'}</button>` : ''}
@@ -3196,7 +3196,7 @@ async function renderCommunity(slug, activeTab = 'posts') {
             <div class="community-hero-name">
               ${esc(community.name)}
               ${community.is_private ? '<span class="comm-private-badge">Private</span>' : ''}
-              ${community.is_verified ? '<span class="comm-verified-badge" title="Verified community">✓</span>' : ''}
+              ${community.is_verified ? '<span class="comm-verified-badge" title="Verified community"><img src="https://img.icons8.com/color/96/instagram-verification-badge.png" style="height: 1em; vertical-align: middle;"></span>' : ''}
               ${boostLevel.level > 0 ? `<span class="comm-boost-badge" style="color:${boostLevel.color}" title="Boost ${boostLevel.label}">⚡ ${boostLevel.label}</span>` : ''}
             </div>
             <div class="community-hero-slug">c/${esc(community.slug)}</div>
