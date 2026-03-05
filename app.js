@@ -722,26 +722,32 @@ let _postDetailId     = null;
 let _postDetailCount  = 0;
 
 
-const ONESIGNAL_APP_ID = '39531d75-1479-49f2-80a0-d3e3f845e8da';
-
 async function registerPush() {
   if (!currentUser) return;
-  if (typeof OneSignal === 'undefined') return;
 
   try {
-    const already = localStorage.getItem('push_asked');
-    if (already === 'dismissed') return;
-
+    if (localStorage.getItem('push_asked') === 'dismissed') return;
     if (Notification.permission === 'denied') return;
 
-    if (Notification.permission === 'default') {
-      const granted = await showPushPrompt();
-      if (!granted) { localStorage.setItem('push_asked', 'dismissed'); return; }
-      await OneSignal.Notifications.requestPermission();
-    }
-
-    await OneSignal.login(currentUser.id);
-    localStorage.setItem('push_asked', 'granted');
+    await new Promise(resolve => {
+      window.OneSignalDeferred = window.OneSignalDeferred || [];
+      window.OneSignalDeferred.push(async (OneSignal) => {
+        try {
+          if (Notification.permission === 'default') {
+            const granted = await showPushPrompt();
+            if (!granted) {
+              localStorage.setItem('push_asked', 'dismissed');
+              resolve();
+              return;
+            }
+            await OneSignal.Notifications.requestPermission();
+          }
+          await OneSignal.login(currentUser.id);
+          localStorage.setItem('push_asked', 'granted');
+        } catch {}
+        resolve();
+      });
+    });
   } catch {}
 }
 
