@@ -724,30 +724,10 @@ let _postDetailCount  = 0;
 
 async function registerPush() {
   if (!currentUser) return;
-
   try {
-    if (localStorage.getItem('push_asked') === 'dismissed') return;
-    if (Notification.permission === 'denied') return;
-
-    await new Promise(resolve => {
-      window.OneSignalDeferred = window.OneSignalDeferred || [];
-      window.OneSignalDeferred.push(async (OneSignal) => {
-        try {
-          if (Notification.permission === 'default') {
-            const granted = await showPushPrompt();
-            if (!granted) {
-              localStorage.setItem('push_asked', 'dismissed');
-              resolve();
-              return;
-            }
-            await OneSignal.Notifications.requestPermission();
-          }
-          await OneSignal.login(currentUser.id);
-          localStorage.setItem('push_asked', 'granted');
-        } catch {}
-        resolve();
-      });
-    });
+    if (window.median?.onesignal) {
+      median.onesignal.externalUserId.set({ externalId: currentUser.id });
+    }
   } catch {}
 }
 
