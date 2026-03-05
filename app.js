@@ -3165,6 +3165,10 @@ async function renderCommunity(slug, activeTab = 'posts') {
     .select('total_points, level').eq('community_id', community.id).maybeSingle();
   const boostTotal = boostData?.total_points || 0;
   const boostLevel = BOOST_LEVELS.reduce((cur, lvl) => boostTotal >= lvl.threshold ? lvl : cur, BOOST_LEVELS[0]);
+  const nextBoostLevel = BOOST_LEVELS[boostLevel.level + 1] || null;
+  const boostBarPct = nextBoostLevel
+    ? Math.min(100, Math.round((boostTotal - boostLevel.threshold) / (nextBoostLevel.threshold - boostLevel.threshold) * 100))
+    : 100;
 
   const isMember = !!myRole;
   const isOwner = myRole === 'owner';
@@ -3204,6 +3208,17 @@ async function renderCommunity(slug, activeTab = 'posts') {
             <div class="community-hero-stats">
               <span id="comm-member-count">${memberCount}</span> member${memberCount!==1?'s':''}
             </div>
+            ${(nextBoostLevel || boostLevel.level > 0) ? `
+            <div class="comm-boost-bar-wrap">
+              <div class="comm-boost-bar-labels">
+                <span style="color:${boostLevel.level > 0 ? boostLevel.color : 'var(--muted2)'}">${boostLevel.level > 0 ? '⚡ ' + boostLevel.label : 'No boost'}</span>
+                ${nextBoostLevel ? `<span style="color:${nextBoostLevel.color}">${nextBoostLevel.label}</span>` : '<span style="color:#f59e0b">Max level! ✨</span>'}
+              </div>
+              <div class="comm-boost-bar-track">
+                <div class="comm-boost-bar-fill" style="width:${boostBarPct}%;background:linear-gradient(to right,#6b7280,#4ade80,#60a5fa,#a78bfa,#f59e0b)"></div>
+              </div>
+              <div class="comm-boost-bar-total">${boostTotal.toLocaleString()} ${nextBoostLevel ? '/ ' + nextBoostLevel.threshold.toLocaleString() + ' pts' : 'pts · Max level reached!'}</div>
+            </div>` : ''}
           </div>
           <div class="community-hero-actions">
             ${currentUser ? (isMember
@@ -4234,20 +4249,30 @@ async function renderMarketplace() {
 }
 
 async function showBoostModal(community, currentTotal, currentLevel) {
+  const nextLevel = BOOST_LEVELS[currentLevel.level + 1] || null;
+  const barPct = nextLevel
+    ? Math.min(100, Math.round((currentTotal - currentLevel.threshold) / (nextLevel.threshold - currentLevel.threshold) * 100))
+    : 100;
+
   const modal = document.createElement('div');
   modal.id = 'boost-modal';
   modal.innerHTML = `
     <div class="custom-modal-scrim"></div>
     <div class="custom-modal-box" style="max-width:400px">
       <h3 class="custom-modal-title">⚡ Boost Community</h3>
-      <div class="boost-level-track">
-        ${BOOST_LEVELS.filter(l => l.level > 0).map(l => `
-          <div class="boost-level-item ${currentTotal >= l.threshold ? 'reached' : ''}">
-            <span style="color:${l.color}">${l.label}</span>
-            <span class="boost-level-threshold">${l.threshold.toLocaleString()} pts</span>
-          </div>`).join('')}
+      <div class="boost-levelup-msg" style="color:${currentLevel.level > 0 ? currentLevel.color : 'var(--muted2)'}">
+        ${currentLevel.level > 0 ? `${currentLevel.label} active` : 'No boost yet'}
+        ${nextLevel ? ` · Next: <span style="color:${nextLevel.color}">${nextLevel.label}</span>` : ' · <span style="color:#f59e0b">Max level reached! ✨</span>'}
       </div>
-      <div class="boost-fund-info">
+      <div class="boost-progress-labels">
+        <span>${currentTotal.toLocaleString()} pts</span>
+        <span>${nextLevel ? nextLevel.threshold.toLocaleString() + ' pts' : 'Max'}</span>
+      </div>
+      <div class="boost-progress-track">
+        <div class="boost-progress-fill boost-progress-animated" style="width:${barPct}%;background:linear-gradient(to right,#6b7280,#4ade80,#60a5fa,#a78bfa,#f59e0b)"></div>
+      </div>
+      <div class="boost-progress-sub">${nextLevel ? `${(nextLevel.threshold - currentTotal).toLocaleString()} pts to ${nextLevel.label}` : 'Community fully boosted!'}</div>
+      <div class="boost-fund-info" style="margin-top:12px">
         Community fund: <strong>${currentTotal.toLocaleString()} pts</strong>
         ${currentLevel.level > 0 ? `· <span style="color:${currentLevel.color}">${currentLevel.label} active</span>` : ''}
       </div>
