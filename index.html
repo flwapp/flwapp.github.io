@@ -2,7 +2,17 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#000000" />
+  <meta name="description" content="Flow — where ideas move." />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Flow" />
+  <!-- Open Graph -->
+  <meta property="og:title" content="Flow" />
+  <meta property="og:description" content="Where ideas move." />
+  <meta property="og:type" content="website" />
   <title>Flow</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -14,6 +24,20 @@
 <div id="app-loader">
     <div class="spinner"></div>
 </div>
+
+<div id="maintenance-screen" style="display:none">
+  <div class="maint-bg"><div class="auth-grid"></div></div>
+  <div class="maint-content">
+    <svg width="52" height="52" viewBox="0 0 44 44" fill="none" style="filter:drop-shadow(0 0 14px rgba(0,123,255,0.7));animation:maint-pulse 3s ease-in-out infinite">
+      <path d="M8 22C8 12 15 5 24 5C33 5 38 12 36 20C34 28 24 27 22 34C20 41 24 46 31 44" stroke="#007BFF" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+    </svg>
+    <div style="font-family:'Bebas Neue',sans-serif;font-size:3rem;letter-spacing:0.08em;line-height:1">Flow</div>
+    <div class="maint-badge">Under Maintenance</div>
+    <p class="maint-text">We're working on something.<br>Check back soon.</p>
+    <div class="maint-dots"><span></span><span></span><span></span></div>
+  </div>
+</div>
+
 <div id="app">
   <div id="page-auth" class="page">
     <div class="auth-bg"><div class="auth-grid"></div></div>
@@ -85,7 +109,7 @@
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
           <span class="notif-badge hidden" id="notif-badge"></span>
         </button>
-        <button class="icon-btn" id="new-post-btn" aria-label="New post">
+        <button class="icon-btn" id="new-post-btn" aria-label="New post" title="New post (N)">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         </button>
         <a href="#/settings">

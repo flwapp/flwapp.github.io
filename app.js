@@ -76,8 +76,147 @@ function esc(str) {
   return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
 }
 
+async function deleteStorageFile(publicUrl, bucket) {
+  if (!publicUrl) return;
+  try {
+    const marker = `/storage/v1/object/public/${bucket}/`;
+    const idx = publicUrl.indexOf(marker);
+    if (idx === -1) return;
+    const filePath = decodeURIComponent(publicUrl.slice(idx + marker.length).split('?')[0]);
+    await sb.storage.from(bucket).remove([filePath]);
+  } catch (_) {}
+}
+
+function showAvatarCropper(file, onCrop) {
+  const existing = document.getElementById('avatar-cropper-modal');
+  if (existing) existing.remove();
+
+  const STAGE = 300;
+  const CIRCLE = 260;
+
+  const modal = document.createElement('div');
+  modal.id = 'avatar-cropper-modal';
+  modal.className = 'modal open';
+  modal.innerHTML = `
+    <div class="modal-scrim" id="cropper-scrim"></div>
+    <div class="modal-sheet" style="max-width:420px">
+      <div class="modal-handle"></div>
+      <div class="modal-head">
+        <h2 class="modal-title">Crop photo</h2>
+        <button class="icon-btn" id="cropper-close-btn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="cropper-stage-wrap">
+        <div class="cropper-stage" id="cropper-stage">
+          <img id="cropper-img" src="" alt="" />
+          <div class="cropper-circle-border"></div>
+        </div>
+      </div>
+      <div class="cropper-zoom-row">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+        <input type="range" id="cropper-zoom" class="cropper-slider" min="0.1" max="4" step="0.01" value="1" />
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      </div>
+      <div class="compose-toolbar" style="padding:12px 16px">
+        <div></div>
+        <button class="btn-post" id="cropper-save-btn">Apply</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+
+  const imgEl = document.getElementById('cropper-img');
+  const stage = document.getElementById('cropper-stage');
+  const zoomInput = document.getElementById('cropper-zoom');
+
+  let imgNW = 0, imgNH = 0, scale = 1;
+  let imgLeft = 0, imgTop = 0;
+  let dragging = false, lastX = 0, lastY = 0;
+
+  const objUrl = URL.createObjectURL(file);
+
+  function applyTransform() {
+    imgEl.style.left = imgLeft + 'px';
+    imgEl.style.top  = imgTop  + 'px';
+    imgEl.style.width  = imgNW * scale + 'px';
+    imgEl.style.height = imgNH * scale + 'px';
+  }
+
+  function clamp() {
+    const circOff = (STAGE - CIRCLE) / 2;
+    imgLeft = Math.min(circOff, Math.max(circOff + CIRCLE - imgNW * scale, imgLeft));
+    imgTop  = Math.min(circOff, Math.max(circOff + CIRCLE - imgNH * scale, imgTop));
+  }
+
+  imgEl.onload = () => {
+    imgNW = imgEl.naturalWidth;
+    imgNH = imgEl.naturalHeight;
+    const minScale = Math.max(CIRCLE / imgNW, CIRCLE / imgNH);
+    scale = minScale;
+    zoomInput.min   = minScale;
+    zoomInput.value = minScale;
+    imgLeft = (STAGE - imgNW * scale) / 2;
+    imgTop  = (STAGE - imgNH * scale) / 2;
+    applyTransform();
+  };
+  imgEl.src = objUrl;
+
+  stage.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; e.preventDefault(); });
+  window.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    imgLeft += e.clientX - lastX; imgTop += e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    clamp(); applyTransform();
+  });
+  window.addEventListener('mouseup', () => { dragging = false; });
+
+  stage.addEventListener('touchstart', e => { dragging = true; lastX = e.touches[0].clientX; lastY = e.touches[0].clientY; }, { passive: true });
+  window.addEventListener('touchmove', e => {
+    if (!dragging) return;
+    imgLeft += e.touches[0].clientX - lastX; imgTop += e.touches[0].clientY - lastY;
+    lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
+    clamp(); applyTransform();
+  }, { passive: true });
+  window.addEventListener('touchend', () => { dragging = false; });
+
+  zoomInput.addEventListener('input', () => {
+    const newScale = parseFloat(zoomInput.value);
+    const cx = STAGE / 2, cy = STAGE / 2;
+    const relX = (cx - imgLeft) / (imgNW * scale);
+    const relY = (cy - imgTop)  / (imgNH * scale);
+    scale = newScale;
+    imgLeft = cx - relX * imgNW * scale;
+    imgTop  = cy - relY * imgNH * scale;
+    clamp(); applyTransform();
+  });
+
+  const close = () => { modal.remove(); URL.revokeObjectURL(objUrl); };
+  document.getElementById('cropper-close-btn').addEventListener('click', close);
+  document.getElementById('cropper-scrim').addEventListener('click', close);
+
+  document.getElementById('cropper-save-btn').addEventListener('click', () => {
+    const OUTPUT = 400;
+    const canvas = document.createElement('canvas');
+    canvas.width = OUTPUT; canvas.height = OUTPUT;
+    const ctx = canvas.getContext('2d');
+    const ratio = OUTPUT / CIRCLE;
+    const circOff = (STAGE - CIRCLE) / 2;
+    ctx.beginPath();
+    ctx.arc(OUTPUT / 2, OUTPUT / 2, OUTPUT / 2, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.drawImage(imgEl,
+      (imgLeft - circOff) * ratio,
+      (imgTop  - circOff) * ratio,
+      imgNW * scale * ratio,
+      imgNH * scale * ratio
+    );
+    canvas.toBlob(blob => { if (blob) onCrop(blob); close(); }, 'image/jpeg', 0.92);
+  });
+}
+
 function linkify(text) {
   return esc(text)
+    .replace(/\n/g, '<br>')
     .replace(/#(\w+)/g, '<a href="#/explore/#$1" class="tag-link">#$1</a>')
     .replace(/@(\w+)/g, '<a href="#/profile/$1">@$1</a>');
 }
@@ -121,8 +260,12 @@ function canPinPosts(profile) {
 function badgesFor(profile) {
   if (!profile) return '';
   let b = '';
+  if (profile.banned)
+    b += `<img class="verified-badge" src="https://img.icons8.com/color/96/cancel-2--v1.png" title="Banned" style="width:16px;height:16px;vertical-align:middle" />`;
   if (profile.username === 'flow' || profile.verified)
     b += `<img class="verified-badge" src="https://img.icons8.com/fluency/96/instagram-verification-badge.png" title="${profile.username === 'flow' ? 'Admin' : 'Verified'}" />`;
+  if (profile.is_moderator && profile.username !== 'flow')
+    b += `<img class="verified-badge" src="https://img.icons8.com/color/96/shield.png" title="Moderator" style="width:16px;height:16px;vertical-align:middle" />`;
   if (profile.equipped_badge) {
     const badge = BADGE_CATALOG.find(x => x.id === profile.equipped_badge);
     if (badge) b += `<span class="user-badge ${badge.color === 'blue' ? 'badge-blue' : 'badge-white'}" title="${esc(badge.label)}">${badge.symbol}</span>`;
@@ -132,8 +275,11 @@ function badgesFor(profile) {
 
 function showToast(msg, type = '') {
   const el = qs('#toast-el');
-  el.textContent = msg;
-  el.style.background = type === 'error' ? 'rgba(60,10,10,.95)' : '';
+  const iconOk = `<svg style="width:16px;height:16px;flex-shrink:0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>`;
+  const iconErr = `<svg style="width:16px;height:16px;flex-shrink:0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`;
+  el.innerHTML = (type === 'error' ? iconErr : iconOk) + `<span>${msg}</span>`;
+  el.style.background = type === 'error' ? 'rgba(60,10,10,.97)' : '';
+  el.style.display = 'flex';
   el.classList.add('show');
   clearTimeout(el._t);
   el._t = setTimeout(() => el.classList.remove('show'), 2800);
@@ -306,17 +452,8 @@ function setupAuth() {
       errEl.textContent = error.message;
       errEl.className = 'form-msg error';
     } else if (data?.session) {
-      currentUser = data.session.user;
-      await ensureProfile();
-      updateAuthUI();
-      setComposeAvatar();
-      qs('#page-auth').classList.add('hidden');
-      qs('#page-app').classList.remove('hidden');
-      if (!location.hash || location.hash === '#' || location.hash === '#/') location.hash = '#/feed';
-      route();
-      loadNotifCount();
-      loadRightPanel();
-      subscribeRealtime();
+      location.hash = '#/feed';
+      location.reload();
     }
   });
 
@@ -329,14 +466,15 @@ function setupAuth() {
     errEl.textContent = ''; errEl.className = 'form-msg';
     if (!username || username.length < 3) { errEl.textContent = 'Username must be 3+ characters.'; errEl.className = 'form-msg error'; return; }
     if (pass.length < 8) { errEl.textContent = 'Password must be 8+ characters.'; errEl.className = 'form-msg error'; return; }
-    
     const email = `${username}@flowapp.net`;
-    
     setBtn(btn, true, 'Create account');
     const { data: authData, error } = await sb.auth.signUp({ email, password: pass, options: { data: { username } } });
     setBtn(btn, false, 'Create account');
     if (error) { errEl.textContent = error.message; errEl.className = 'form-msg error'; }
-    else {
+    else if (authData?.session) {
+      location.hash = '#/feed';
+      location.reload();
+    } else {
       errEl.textContent = 'Account created! Sign in with your username.'; errEl.className = 'form-msg success';
     }
   });
@@ -411,15 +549,16 @@ function setupLoginPage() {
       errEl.textContent = error.message;
       errEl.className = 'form-msg error';
     } else if (data?.session) {
-      currentUser = data.session.user;
-      await ensureProfile();
-      updateAuthUI();
-      setComposeAvatar();
+      const { data: prof } = await sb.from('profiles').select('banned').eq('id', data.session.user.id).single();
+      if (prof?.banned) {
+        await sb.auth.signOut();
+        errEl.textContent = 'This account has been banned.';
+        errEl.className = 'form-msg error';
+        setBtn(btn, false, 'Sign in');
+        return;
+      }
       location.hash = '#/feed';
-      route();
-      loadNotifCount();
-      loadRightPanel();
-      subscribeRealtime();
+      location.reload();
     }
   });
 
@@ -432,14 +571,15 @@ function setupLoginPage() {
     errEl.textContent = ''; errEl.className = 'form-msg';
     if (!username || username.length < 3) { errEl.textContent = 'Username must be 3+ characters.'; errEl.className = 'form-msg error'; return; }
     if (pass.length < 8) { errEl.textContent = 'Password must be 8+ characters.'; errEl.className = 'form-msg error'; return; }
-    
     const email = `${username}@flowapp.net`;
-    
     setBtn(btn, true, 'Create account');
     const { data: authData, error } = await sb.auth.signUp({ email, password: pass, options: { data: { username } } });
     setBtn(btn, false, 'Create account');
     if (error) { errEl.textContent = error.message; errEl.className = 'form-msg error'; }
-    else {
+    else if (authData?.session) {
+      location.hash = '#/feed';
+      location.reload();
+    } else {
       errEl.textContent = 'Account created! Sign in with your username.'; errEl.className = 'form-msg success';
       setTimeout(() => {
         qs('#register-page-form').reset();
@@ -513,10 +653,10 @@ function scorePost(post, followingIds = [], seenIds = new Set()) {
 async function loadFeedPosts(tab) {
   const list = qs('#feed-posts');
   if (!list) return;
-  list.innerHTML = '<div class="full-loader"><div class="spinner"></div></div>';
+  list.innerHTML = typeof skeletonPosts === 'function' ? skeletonPosts(5) : '<div class="full-loader"><div class="spinner"></div></div>';
 
   let query = sb.from('posts')
-    .select('id, content, post_type, media_url, media_type, created_at, user_id, view_count, quote_of, profiles(id, username, avatar_url, display_name, verified), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)')
+    .select('id, content, post_type, media_url, media_type, created_at, user_id, view_count, quote_of, is_pinned, profiles(id, username, avatar_url, display_name, verified, banned), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)')
     .is('reply_to', null)
     .is('community_id', null)
     .limit(80);
@@ -548,6 +688,7 @@ async function loadFeedPosts(tab) {
     .sort((a, b) => b.score - a.score);
 
   const ranked = scored.slice(0, 40).map(s => s.post);
+  ranked.sort((a, b) => (b.is_pinned ? 1 : 0) - (a.is_pinned ? 1 : 0));
 
   ranked.forEach(p => seenIds.add(p.id));
   try { sessionStorage.setItem('flow_seen', JSON.stringify([...seenIds].slice(-200))); } catch {}
@@ -677,8 +818,8 @@ function postCardHTML(post, quotedPost = null, opts = {}) {
           </span>
         </div>
         <div style="display:flex;gap:4px">
-          ${canPin ? `<button class="action-btn pin-btn" data-post-id="${post.id}" title="Pin/Unpin post" style="color:${post.is_pinned ? 'var(--yellow)' : 'var(--muted)'}">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4v7H4v2h10v7l5-8-5-8Z"/></svg>
+          ${canPin ? `<button class="action-btn pin-btn" data-post-id="${post.id}" data-pinned="${post.is_pinned ? '1' : '0'}" title="${post.is_pinned ? 'Unpin post' : 'Pin post'}">
+            <img src="https://img.icons8.com/material-${post.is_pinned ? 'sharp' : 'outlined'}/48/pin.png" style="width:14px;height:14px;filter:invert(1);opacity:${post.is_pinned ? '1' : '0.45'}" />
           </button>` : ''}
           ${canDelete ? `<button class="action-btn delete-btn" data-post-id="${post.id}" title="Delete post">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
@@ -708,7 +849,7 @@ function bindPostActions(ctx) {
   qsa('.post-username', ctx).forEach(el => {
     el.addEventListener('click', e => { e.preventDefault(); location.hash = el.href.split('#')[1] || `#/profile/${el.textContent.replace('@','')}` ; });
   });
-  qsa('.post-img', ctx).forEach(img => img.addEventListener('click', () => window.open(img.src, '_blank')));
+  qsa('.post-img', ctx).forEach(img => img.addEventListener('click', e => { e.stopPropagation(); openLightbox(img.src); }));
   qsa('.poll-bar-wrap', ctx).forEach(bar => bar.addEventListener('click', () => { if (!requireAuth()) return; votePoll(bar.dataset.optionId, bar.closest('.post-card').dataset.postId); }));
 }
 
@@ -758,11 +899,21 @@ function copyLink(postId) {
 }
 
 async function togglePin(postId, btn) {
-  const isPinned = btn.style.color === 'var(--yellow)';
+  btn.disabled = true;
+  const isPinned = btn.dataset.pinned === '1';
   const { error } = await sb.from('posts').update({ is_pinned: !isPinned }).eq('id', postId);
+  btn.disabled = false;
   if (error) { showToast('Error: ' + error.message, 'error'); return; }
-  btn.style.color = isPinned ? 'var(--muted)' : 'var(--yellow)';
-  showToast(isPinned ? 'Post unpinned.' : 'Post pinned!');
+  const newPinned = !isPinned;
+  btn.dataset.pinned = newPinned ? '1' : '0';
+  btn.title = newPinned ? 'Unpin post' : 'Pin post';
+  const img = btn.querySelector('img');
+  if (img) {
+    img.src = `https://img.icons8.com/material-${newPinned ? 'sharp' : 'outlined'}/48/pin.png`;
+    img.style.opacity = newPinned ? '1' : '0.45';
+  }
+  showToast(newPinned ? 'Post pinned!' : 'Post unpinned.');
+  renderFeed();
 }
 
 async function deletePost(postId, btn) {
@@ -774,6 +925,7 @@ async function deletePost(postId, btn) {
     danger: true,
     onConfirm: async () => {
       btn.disabled = true;
+      const { data: postData } = await sb.from('posts').select('media_url, post_type').eq('id', postId).single();
       let query = sb.from('posts').delete().eq('id', postId);
       if (!isAdmin()) query = query.eq('user_id', currentUser.id);
       const { error } = await query;
@@ -781,6 +933,10 @@ async function deletePost(postId, btn) {
         showToast('Error deleting post: ' + error.message, 'error');
         btn.disabled = false;
         return;
+      }
+      if (postData?.media_url) {
+        const bucket = postData.post_type === 'video' ? 'post-videos' : 'post-images';
+        await deleteStorageFile(postData.media_url, bucket);
       }
       btn.closest('.post-card')?.remove();
       showToast('Deleted.');
@@ -805,7 +961,6 @@ let _feedNewestTs     = null;
 let _notifNewestTs    = null;
 let _postDetailId     = null;
 let _postDetailCount  = 0;
-
 
 async function registerPush() {
   if (!currentUser) return;
@@ -845,8 +1000,6 @@ function showPushPrompt() {
     });
   });
 }
-
-
 
 function subscribeRealtime() {
   if (!currentUser || realtimeSub) return;
@@ -1034,7 +1187,7 @@ async function rtRefreshProfilePosts() {
   const list = qs('#profile-posts');
   if (!list || !_rtViewedUserId) return;
   const { data: posts } = await sb.from('posts')
-    .select('id, content, post_type, media_url, created_at, user_id, profiles(id, username, avatar_url), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)')
+    .select('id, content, post_type, media_url, created_at, user_id, profiles(id, username, avatar_url, banned), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)')
     .eq('user_id', _rtViewedUserId).is('reply_to', null).order('created_at', { ascending: false }).limit(30);
   if (!posts) return;
   list.innerHTML = posts.length ? posts.map(p => postCardHTML(p)).join('') : emptyState('No posts yet.');
@@ -1211,7 +1364,7 @@ async function searchUsers(q, el) {
 async function searchPosts(q, el) {
   if (!q) { el.innerHTML = emptyState('Type something to search posts.'); return; }
   const { data } = await sb.from('posts')
-    .select('id, content, post_type, media_url, created_at, user_id, profiles(id, username, avatar_url), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)')
+    .select('id, content, post_type, media_url, created_at, user_id, profiles(id, username, avatar_url, banned), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)')
     .ilike('content', `%${q}%`)
     .is('reply_to', null)
     .order('created_at', { ascending: false })
@@ -1296,7 +1449,7 @@ async function renderBookmarks() {
     <div class="post-list" id="bm-list"><div class="full-loader"><div class="spinner"></div></div></div>`;
 
   const { data } = await sb.from('bookmarks')
-    .select('post_id, posts(id, content, post_type, media_url, created_at, user_id, profiles(id, username, avatar_url), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id))')
+    .select('post_id, posts(id, content, post_type, media_url, created_at, user_id, profiles(id, username, avatar_url, banned), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id))')
     .eq('user_id', currentUser.id)
     .order('created_at', { ascending: false });
 
@@ -1314,17 +1467,15 @@ async function renderProfile(username) {
 
   const { data: profile, error } = await sb.from('profiles').select('*').eq('username', username).single();
   if (error || !profile) { view.innerHTML = emptyState('User not found.'); return; }
-  // Track for realtime live updates
   _rtViewedUsername = profile.username;
   _rtViewedUserId   = profile.id;
-
 
   const isOwn = currentUser ? profile.id === currentUser.id : false;
 
   const [{ count: fc }, { count: fg }, { data: posts }, followCheck] = await Promise.all([
     sb.from('follows').select('*', { count: 'exact', head: true }).eq('following_id', profile.id),
     sb.from('follows').select('*', { count: 'exact', head: true }).eq('follower_id', profile.id),
-    sb.from('posts').select('id, content, post_type, media_url, created_at, user_id, profiles(id, username, avatar_url), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)').eq('user_id', profile.id).is('reply_to', null).order('created_at', { ascending: false }).limit(30),
+    sb.from('posts').select('id, content, post_type, media_url, created_at, user_id, profiles(id, username, avatar_url, banned), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)').eq('user_id', profile.id).is('reply_to', null).order('created_at', { ascending: false }).limit(30),
     (isOwn || !currentUser) ? null : sb.from('follows').select('follower_id').eq('follower_id', currentUser.id).eq('following_id', profile.id).maybeSingle()
   ]);
 
@@ -1364,7 +1515,10 @@ async function renderProfile(username) {
             <div class="admin-dropdown hidden" id="admin-dropdown">
               <button class="admin-drop-item" id="adm-rename">Change username</button>
               <button class="admin-drop-item" id="adm-verify">${profile.verified ? 'Remove checkmark' : 'Give checkmark'}</button>
-              <button class="admin-drop-item danger" id="adm-ban">Ban account</button>
+              <button class="admin-drop-item" id="adm-warn">Warn user</button>
+              <button class="admin-drop-item" id="adm-mod">${profile.is_moderator ? 'Remove moderator' : 'Make moderator'}</button>
+              <button class="admin-drop-item" id="adm-modlog">View mod log</button>
+              <button class="admin-drop-item danger" id="adm-ban">${profile.banned ? 'Unban account' : 'Ban account'}</button>
               <button class="admin-drop-item danger" id="adm-delete">Delete account</button>
             </div>
           </div>` : ''}
@@ -1481,19 +1635,54 @@ async function renderProfile(username) {
       else { showToast(newVal ? 'Checkmark granted ✓' : 'Checkmark removed'); renderProfile(profile.username); }
     });
 
+    qs('#adm-warn')?.addEventListener('click', () => {
+      dropdown.classList.add('hidden');
+      showWarnModal(profile);
+    });
+
+    qs('#adm-modlog')?.addEventListener('click', () => {
+      dropdown.classList.add('hidden');
+      showModLog();
+    });
+
+    qs('#adm-mod')?.addEventListener('click', () => {
+      dropdown.classList.add('hidden');
+      const isMod = !!profile.is_moderator;
+      showConfirmModal({
+        title: isMod ? 'Remove moderator' : 'Make moderator',
+        message: isMod
+          ? `Remove moderator role from @${profile.username}?`
+          : `Give @${profile.username} moderator privileges?`,
+        confirmText: isMod ? 'Remove' : 'Make moderator',
+        confirmClass: 'btn-primary',
+        onConfirm: async () => {
+          const { error } = await sb.from('profiles').update({ is_moderator: !isMod }).eq('id', profile.id);
+          if (error) { showToast('Error: ' + error.message, 'error'); return; }
+          await logModAction(isMod ? 'moderator_remove' : 'moderator_add', profile.id);
+          showToast(isMod ? `Moderator removed from @${profile.username}.` : `@${profile.username} is now a moderator.`);
+          renderProfile(profile.username);
+        }
+      });
+    });
+
     qs('#adm-ban')?.addEventListener('click', () => {
       dropdown.classList.add('hidden');
+      const isBanned = !!profile.banned;
       showConfirmModal({
-        title: 'Ban account',
-        message: `Ban @${profile.username}? They will be signed out and unable to use the platform.`,
-        confirmText: 'Ban',
+        title: isBanned ? 'Unban account' : 'Ban account',
+        message: isBanned
+          ? `Unban @${profile.username}? They will be able to use the platform again.`
+          : `Ban @${profile.username}? They will be unable to use the platform.`,
+        confirmText: isBanned ? 'Unban' : 'Ban',
         confirmClass: 'btn-danger',
         danger: true,
-        requireType: 'BAN',
+        requireType: isBanned ? 'UNBAN' : 'BAN',
         onConfirm: async () => {
-          const { error } = await sb.from('profiles').update({ banned: true }).eq('id', profile.id);
-          if (error) showToast('Error: ' + error.message, 'error');
-          else { showToast(`@${profile.username} has been banned.`); location.hash = '#/feed'; }
+          const { error } = await sb.from('profiles').update({ banned: !isBanned }).eq('id', profile.id);
+          if (error) { showToast('Error: ' + error.message, 'error'); return; }
+          await logModAction(isBanned ? 'unban' : 'ban', profile.id);
+          showToast(isBanned ? `@${profile.username} has been unbanned.` : `@${profile.username} has been banned.`);
+          renderProfile(profile.username);
         }
       });
     });
@@ -1522,7 +1711,7 @@ async function loadProfileTab(tab, userId, isOwn) {
   area.innerHTML = '<div class="full-loader"><div class="spinner"></div></div>';
 
   if (tab === 'posts') {
-    const { data } = await sb.from('posts').select('id, content, post_type, media_url, created_at, user_id, profiles(id, username, avatar_url), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)').eq('user_id', userId).is('reply_to', null).order('created_at', { ascending: false }).limit(30);
+    const { data } = await sb.from('posts').select('id, content, post_type, media_url, created_at, user_id, profiles(id, username, avatar_url, banned), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)').eq('user_id', userId).is('reply_to', null).order('created_at', { ascending: false }).limit(30);
     area.innerHTML = `<div class="post-list">${data?.length ? data.map(p=>postCardHTML(p)).join('') : emptyState('No posts.')}</div>`;
     bindPostActions(area);
   } else if (tab === 'replies') {
@@ -1542,7 +1731,7 @@ async function loadProfileTab(tab, userId, isOwn) {
         ${p.post_type==='video' ? `<video src="${esc(p.media_url)}" style="width:100%;height:100%;object-fit:cover"></video>` : `<img src="${esc(p.media_url)}" style="width:100%;height:100%;object-fit:cover" loading="lazy" />`}
       </div>`).join('') : '<p style="padding:24px;color:var(--muted2);font-size:.88rem">No media posts.</p>'}</div>`;
   } else if (tab === 'likes' && isOwn) {
-    const { data } = await sb.from('reactions').select('post_id, posts(id, content, post_type, media_url, created_at, user_id, profiles(id, username, avatar_url), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id))').eq('user_id', userId).eq('type', 'like').order('created_at', { ascending: false }).limit(30);
+    const { data } = await sb.from('reactions').select('post_id, posts(id, content, post_type, media_url, created_at, user_id, profiles(id, username, avatar_url, banned), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id))').eq('user_id', userId).eq('type', 'like').order('created_at', { ascending: false }).limit(30);
     const posts = data?.map(r=>r.posts).filter(Boolean)||[];
     area.innerHTML = `<div class="post-list">${posts.length ? posts.map(p=>postCardHTML(p)).join('') : emptyState('No liked posts.')}</div>`;
     bindPostActions(area);
@@ -1610,28 +1799,33 @@ async function saveProfileEdit(oldProfile) {
 
 async function uploadAvatar(file, profile) {
   if (!file) return;
-  showToast('Uploading…');
-  const ext  = file.name.split('.').pop().toLowerCase();
-  const path = `${currentUser.id}/avatar.${ext}`;
-  const { error: upErr } = await sb.storage.from('avatars').upload(path, file, { cacheControl: '3600', upsert: true });
-  if (upErr) { showToast('Upload failed: ' + upErr.message, 'error'); return; }
-  const { data: { publicUrl } } = sb.storage.from('avatars').getPublicUrl(path);
-  await sb.from('profiles').update({ avatar_url: publicUrl }).eq('id', currentUser.id);
-  currentProfile.avatar_url = publicUrl;
-  setComposeAvatar();
-  showToast('Avatar updated!');
-  renderProfile(profile.username);
+  showAvatarCropper(file, async (blob) => {
+    showToast('Uploading…');
+    const oldUrl = currentProfile.avatar_url;
+    const path = `${currentUser.id}/avatar_${Date.now()}.jpg`;
+    const { error: upErr } = await sb.storage.from('avatars').upload(path, blob, { contentType: 'image/jpeg', cacheControl: '3600', upsert: true });
+    if (upErr) { showToast('Upload failed: ' + upErr.message, 'error'); return; }
+    const { data: { publicUrl } } = sb.storage.from('avatars').getPublicUrl(path);
+    await sb.from('profiles').update({ avatar_url: publicUrl }).eq('id', currentUser.id);
+    if (oldUrl) await deleteStorageFile(oldUrl, 'avatars');
+    currentProfile.avatar_url = publicUrl;
+    setComposeAvatar();
+    showToast('Avatar updated!');
+    renderProfile(profile.username);
+  });
 }
 
 async function uploadCover(file, profile) {
   if (!file) return;
   showToast('Uploading cover…');
+  const oldUrl = currentProfile.cover_url;
   const ext  = file.name.split('.').pop().toLowerCase();
-  const path = `${currentUser.id}/cover.${ext}`;
+  const path = `${currentUser.id}/cover_${Date.now()}.${ext}`;
   const { error: upErr } = await sb.storage.from('avatars').upload(path, file, { cacheControl: '3600', upsert: true });
   if (upErr) { showToast('Cover upload failed: ' + upErr.message, 'error'); return; }
   const { data: { publicUrl } } = sb.storage.from('avatars').getPublicUrl(path);
   await sb.from('profiles').update({ cover_url: publicUrl }).eq('id', currentUser.id);
+  if (oldUrl) await deleteStorageFile(oldUrl, 'avatars');
   currentProfile.cover_url = publicUrl;
   showToast('Cover updated!');
   renderProfile(profile.username);
@@ -1642,7 +1836,7 @@ async function renderPostDetail(postId) {
   view.innerHTML = `<div class="view-header"><h1 class="view-title">Post</h1></div><div class="full-loader"><div class="spinner"></div></div>`;
   if (!postId) { view.innerHTML += emptyState('Post not found.'); return; }
 
-  const { data: post } = await sb.from('posts').select('id, content, post_type, media_url, created_at, user_id, profiles(id, username, avatar_url), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)').eq('id', postId).single();
+  const { data: post } = await sb.from('posts').select('id, content, post_type, media_url, created_at, user_id, profiles(id, username, avatar_url, banned), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)').eq('id', postId).single();
   if (!post) { view.innerHTML = emptyState('Post not found.'); return; }
 
   const { data: replies } = await sb.from('comments').select('*, profiles(username, avatar_url)').eq('post_id', postId).order('created_at', { ascending: true });
@@ -2248,17 +2442,20 @@ async function loadSuggestions() {
   const fids = new Set((follows||[]).map(f=>f.following_id));
   fids.add(currentUser.id);
 
-  const { data: users } = await sb.from('profiles').select('id, username, avatar_url').limit(20);
+  const { data: users } = await sb.from('profiles').select('id, username, display_name, avatar_url, verified, banned, is_moderator').limit(20);
   const candidates = (users||[]).filter(u=>!fids.has(u.id)).slice(0,4);
 
   if (!candidates.length) { el.innerHTML = '<p style="font-size:.8rem;color:var(--muted2)">You follow everyone!</p>'; return; }
   el.innerHTML = candidates.map(u => `
     <div class="suggest-item">
-      ${avatarEl(u,'size-sm')}
-      <div class="suggest-info">
-        <div class="suggest-name">@${esc(u.username)}</div>
-      </div>
-      <button class="btn-follow" data-uid="${u.id}" style="font-size:.75rem;padding:4px 10px" onclick="this.classList.add('following');this.textContent='Following';sb.from('follows').insert({follower_id:'${currentUser.id}',following_id:'${u.id}'})">Follow</button>
+      <a href="#/profile/${esc(u.username)}" style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;text-decoration:none;color:inherit;overflow:hidden">
+        ${avatarEl(u,'size-sm')}
+        <div class="suggest-info" style="min-width:0;overflow:hidden">
+          <div class="suggest-name" style="display:flex;align-items:center;gap:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(u.display_name || u.username)}${badgesFor(u)}</div>
+          <div style="font-size:.73rem;color:var(--muted2)">@${esc(u.username)}</div>
+        </div>
+      </a>
+      <button class="btn-follow" data-uid="${u.id}" style="font-size:.75rem;padding:4px 10px;flex-shrink:0" onclick="event.stopPropagation();this.classList.add('following');this.textContent='Following';sb.from('follows').insert({follower_id:'${currentUser.id}',following_id:'${u.id}'})">Follow</button>
     </div>`).join('');
 }
 
@@ -2286,10 +2483,24 @@ function setupNotifications() {
 
 async function initApp() {
   try {
+    const { data: cfg } = await sb.from('site_config').select('maintenance_mode').eq('id', 1).single();
+    if (cfg?.maintenance_mode === true) {
+      document.getElementById('app-loader').style.display = 'none';
+      document.getElementById('maintenance-screen').style.display = 'flex';
+      return;
+    }
+  } catch (_) {}
+
+  try {
     const { data: { session } } = await sb.auth.getSession();
     if (session) {
       currentUser = session.user;
       await ensureProfile();
+      if (currentProfile?.banned) {
+        await sb.auth.signOut();
+        currentUser = null;
+        currentProfile = null;
+      }
     }
   } catch (e) {
     currentUser = null;
@@ -2407,7 +2618,6 @@ function updateAuthUI() {
   const logoutBtn = qs('#logout-btn');
   if (logoutBtn) logoutBtn.style.display = 'none';
 }
-
 
 function showConfirmModal({ title, message, confirmText = 'Confirm', confirmClass = 'btn-danger', onConfirm, danger = false, requireType = null }) {
   const existing = qs('#custom-confirm-modal');
@@ -2581,6 +2791,195 @@ async function compressImage(file, maxPx = 480) {
   });
 }
 
+
+async function logModAction(action, targetId, reason = null) {
+  try {
+    await sb.from('mod_actions').insert({
+      mod_id: currentUser.id,
+      target_id: targetId,
+      action,
+      reason: reason || null
+    });
+  } catch (_) {}
+}
+
+async function showModLog() {
+  const existing = document.getElementById('modlog-modal');
+  if (existing) { existing.remove(); return; }
+
+  const modal = document.createElement('div');
+  modal.className = 'modal open';
+  modal.id = 'modlog-modal';
+  modal.innerHTML = `
+    <div class="modal-scrim"></div>
+    <div class="modal-sheet" style="max-width:560px">
+      <div class="modal-handle"></div>
+      <div class="modal-head">
+        <h2 class="modal-title">Mod Action Log</h2>
+        <button class="icon-btn modlog-close" type="button">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div id="modlog-body" style="padding:8px 16px 16px;overflow-y:auto;max-height:65vh">
+        <div class="full-loader"><div class="spinner"></div></div>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+
+  modal.querySelector('.modal-scrim').addEventListener('click', () => modal.remove());
+  modal.querySelector('.modlog-close').addEventListener('click', () => modal.remove());
+
+  const ACTION_LABELS = {
+    warn: '⚠️ Warned',
+    ban: '🚫 Banned',
+    unban: '✅ Unbanned',
+    moderator_add: '🛡️ Made Moderator',
+    moderator_remove: '🛡️ Removed Moderator',
+    verify: '✓ Verified',
+    unverify: '✓ Unverified',
+  };
+
+  const { data, error } = await sb.from('mod_actions')
+    .select('id, action, reason, created_at, mod:mod_id(username, avatar_url), target:target_id(username, avatar_url)')
+    .order('created_at', { ascending: false })
+    .limit(100);
+
+  const body = modal.querySelector('#modlog-body');
+  if (error || !data?.length) {
+    body.innerHTML = `<p style="text-align:center;color:var(--muted2);padding:24px">No actions logged yet.</p>`;
+    return;
+  }
+
+  body.innerHTML = data.map(a => `
+    <div style="display:flex;align-items:flex-start;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:.85rem;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <strong>${ACTION_LABELS[a.action] || a.action}</strong>
+          <span style="color:var(--muted2)">by</span>
+          <a href="#/profile/${esc(a.mod?.username)}" onclick="modal.remove()" style="color:var(--blue)">@${esc(a.mod?.username || '?')}</a>
+          <span style="color:var(--muted2)">→</span>
+          <a href="#/profile/${esc(a.target?.username)}" onclick="modal.remove()" style="color:var(--blue)">@${esc(a.target?.username || '?')}</a>
+        </div>
+        ${a.reason ? `<div style="font-size:.78rem;color:var(--muted2);margin-top:3px">${esc(a.reason)}</div>` : ''}
+        <div style="font-size:.75rem;color:var(--muted2);margin-top:2px">${timeAgo(a.created_at)}</div>
+      </div>
+    </div>`).join('');
+}
+
+function getGreeting() {
+  const h = new Date().getHours();
+  if (h < 12) return 'Good morning';
+  if (h < 18) return 'Good afternoon';
+  return 'Good evening';
+}
+
+async function sendNoreplyDM(toUserId, text) {
+  const { data: noreplyProfile } = await sb.from('profiles').select('id').eq('username', 'noreply').single();
+  if (!noreplyProfile) { showToast('noreply account not found', 'error'); return; }
+  const [a, b] = [noreplyProfile.id, toUserId].sort();
+  let { data: conv } = await sb.from('conversations').select('id').eq('user1_id', a).eq('user2_id', b).maybeSingle();
+  if (!conv) {
+    const { data: newConv } = await sb.from('conversations').insert({ user1_id: a, user2_id: b }).select('id').single();
+    conv = newConv;
+  }
+  await sb.from('messages').insert({
+    conversation_id: conv.id,
+    sender_id: noreplyProfile.id,
+    content: text,
+    message_type: 'text'
+  });
+  await sb.from('conversations').update({ last_message_at: new Date().toISOString() }).eq('id', conv.id);
+}
+
+function showWarnModal(profile) {
+  const WARN_REASONS = [
+    'Spam or self-promotion',
+    'Harassment or bullying',
+    'Hate speech or discrimination',
+    'Misinformation or false content',
+    'Inappropriate or explicit content',
+    'Impersonation',
+    'Other (write your own)',
+  ];
+
+  // Remove any existing warn modal
+  document.getElementById('warn-modal')?.remove();
+
+  const modal = document.createElement('div');
+  modal.className = 'modal open';
+  modal.id = 'warn-modal';
+
+  const reasonsHtml = WARN_REASONS.map((r, i) =>
+    `<label class="warn-reason-row" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;transition:background .15s">
+      <input type="radio" name="warn-reason-${modal.id}" value="${esc(r)}" data-idx="${i}" style="accent-color:var(--blue)" />
+      <span style="font-size:.88rem">${esc(r)}</span>
+    </label>`
+  ).join('');
+
+  modal.innerHTML = `
+    <div class="modal-scrim"></div>
+    <div class="modal-sheet" style="max-width:440px">
+      <div class="modal-handle"></div>
+      <div class="modal-head">
+        <h2 class="modal-title">Warn @${esc(profile.username)}</h2>
+        <button class="icon-btn warn-close-btn" type="button">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div style="padding:0 16px 8px;overflow-y:auto;max-height:60vh">
+        <p style="font-size:.83rem;color:var(--muted2);margin-bottom:12px">Select a reason for the warning:</p>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          ${reasonsHtml}
+        </div>
+        <textarea class="warn-custom-text field-input" rows="2" maxlength="300" placeholder="Describe the reason…" style="margin-top:10px;display:none;resize:none;width:100%;box-sizing:border-box"></textarea>
+      </div>
+      <div class="compose-toolbar" style="padding:12px 16px;display:flex;align-items:center;justify-content:space-between">
+        <div class="warn-err" style="font-size:.8rem;color:var(--red)"></div>
+        <button class="btn-post warn-next-btn" type="button">Next →</button>
+      </div>
+    </div>`;
+
+  document.body.appendChild(modal);
+
+  const closeWarn = () => modal.remove();
+
+  modal.querySelector('.modal-scrim').addEventListener('click', closeWarn);
+  modal.querySelector('.warn-close-btn').addEventListener('click', closeWarn);
+
+  modal.querySelectorAll('input[type="radio"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      const isOther = parseInt(radio.dataset.idx) === WARN_REASONS.length - 1;
+      modal.querySelector('.warn-custom-text').style.display = isOther ? 'block' : 'none';
+      modal.querySelectorAll('.warn-reason-row').forEach(row => row.style.background = '');
+      radio.closest('.warn-reason-row').style.background = 'var(--surface2)';
+    });
+  });
+
+  modal.querySelector('.warn-next-btn').addEventListener('click', () => {
+    const selected = modal.querySelector('input[type="radio"]:checked');
+    const errEl = modal.querySelector('.warn-err');
+    if (!selected) { errEl.textContent = 'Please select a reason.'; return; }
+    const isOther = parseInt(selected.dataset.idx) === WARN_REASONS.length - 1;
+    const customText = modal.querySelector('.warn-custom-text').value.trim();
+    if (isOther && !customText) { errEl.textContent = 'Please describe the reason.'; return; }
+    const reason = isOther ? customText : selected.value;
+    closeWarn();
+    showConfirmModal({
+      title: 'Confirm warning',
+      message: `Send a warning to @${esc(profile.username)}?<br><br><em style="color:var(--muted2);font-size:.85rem">${esc(reason)}</em>`,
+      confirmText: 'Send warning',
+      confirmClass: 'btn-primary',
+      onConfirm: async () => {
+        const greeting = getGreeting();
+        const msg = `${greeting}, @${profile.username}.\n\nYou are receiving this warning from the Flow team regarding a violation of our community guidelines.\n\n**Reason:** ${reason}\n\nPlease review our guidelines and ensure your future activity complies with them. Repeated violations may result in further action, including a permanent ban.\n\n— Flow Team`;
+        await sendNoreplyDM(profile.id, msg);
+        await logModAction('warn', profile.id, reason);
+        showToast(`Warning sent to @${profile.username}.`);
+      }
+    });
+  });
+}
+
 async function openDM(otherUserId) {
   if (!requireAuth()) return;
   const uid = currentUser.id;
@@ -2726,7 +3125,12 @@ async function renderChat(convId) {
     </div>
     <div class="chat-messages" id="chat-messages"><div class="full-loader"><div class="spinner"></div></div></div>
     <div id="typing-indicator" style="padding:8px 16px;font-size:.75rem;color:var(--muted2);min-height:20px;display:none">Someone is typing...</div>
-    <div class="chat-composer">
+    ${other?.username === 'noreply'
+      ? `<div style="padding:12px 16px;text-align:center;font-size:.8rem;color:var(--muted2);border-top:1px solid var(--border);background:var(--surface)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:middle;margin-right:4px"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+          This is an automated account. You cannot reply.
+        </div>`
+      : `<div class="chat-composer">
       <label class="chat-img-btn" title="Send photo">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
         <input type="file" id="chat-img-input" accept="image/*" hidden />
@@ -2735,7 +3139,8 @@ async function renderChat(convId) {
       <button class="chat-send-btn" id="chat-send-btn">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
       </button>
-    </div>`;
+    </div>`}
+    `;
 
   await loadChatMessages(convId);
 
@@ -2856,7 +3261,7 @@ async function loadChatMessages(convId) {
     
     const content = m.message_type === 'image'
       ? `<img src="${esc(m.media_url)}" class="chat-img-msg" loading="lazy" />`
-      : `<span>${esc(m.content)}</span>`;
+      : `<span class="chat-md">${typeof marked !== 'undefined' ? marked.parse(m.content || '') : esc(m.content)}</span>`;
       
   const deleteBtn = mine ? `<button class="chat-msg-delete" data-msg-id="${m.id}" data-conv-id="${convId}" title="Delete" style="display:inline-flex;align-items:center;justify-content:center;background:none;border:none;padding:2px"><img src="https://img.icons8.com/material-rounded/96/trash.png" style="width:14px;height:14px;filter:invert(1);opacity:1" alt="delete"></button>` : '';
     
@@ -3165,10 +3570,6 @@ async function renderCommunity(slug, activeTab = 'posts') {
     .select('total_points, level').eq('community_id', community.id).maybeSingle();
   const boostTotal = boostData?.total_points || 0;
   const boostLevel = BOOST_LEVELS.reduce((cur, lvl) => boostTotal >= lvl.threshold ? lvl : cur, BOOST_LEVELS[0]);
-  const nextBoostLevel = BOOST_LEVELS[boostLevel.level + 1] || null;
-  const boostBarPct = nextBoostLevel
-    ? Math.min(100, Math.round((boostTotal - boostLevel.threshold) / (nextBoostLevel.threshold - boostLevel.threshold) * 100))
-    : 100;
 
   const isMember = !!myRole;
   const isOwner = myRole === 'owner';
@@ -3208,17 +3609,6 @@ async function renderCommunity(slug, activeTab = 'posts') {
             <div class="community-hero-stats">
               <span id="comm-member-count">${memberCount}</span> member${memberCount!==1?'s':''}
             </div>
-            ${(nextBoostLevel || boostLevel.level > 0) ? `
-            <div class="comm-boost-bar-wrap">
-              <div class="comm-boost-bar-labels">
-                <span style="color:${boostLevel.level > 0 ? boostLevel.color : 'var(--muted2)'}">${boostLevel.level > 0 ? '⚡ ' + boostLevel.label : 'No boost'}</span>
-                ${nextBoostLevel ? `<span style="color:${nextBoostLevel.color}">${nextBoostLevel.label}</span>` : '<span style="color:#f59e0b">Max level! ✨</span>'}
-              </div>
-              <div class="comm-boost-bar-track">
-                <div class="comm-boost-bar-fill" style="width:${boostBarPct}%;background:linear-gradient(to right,#6b7280,#4ade80,#60a5fa,#a78bfa,#f59e0b)"></div>
-              </div>
-              <div class="comm-boost-bar-total">${boostTotal.toLocaleString()} ${nextBoostLevel ? '/ ' + nextBoostLevel.threshold.toLocaleString() + ' pts' : 'pts · Max level reached!'}</div>
-            </div>` : ''}
           </div>
           <div class="community-hero-actions">
             ${currentUser ? (isMember
@@ -3322,8 +3712,10 @@ async function renderCommunity(slug, activeTab = 'posts') {
       },
       onImage: async (file) => {
         showToast('Uploading…');
+        const oldUrl = community.cover_url;
         const url = await uploadFile(file, 'avatars', 'community-covers');
         await sb.from('communities').update({ cover_url: url }).eq('id', community.id);
+        if (oldUrl) await deleteStorageFile(oldUrl, 'avatars');
         community.cover_url = url;
         const coverEl = qs('#comm-cover-el');
         if (coverEl) { coverEl.style.backgroundImage = `url('${url}')`; coverEl.style.backgroundSize = 'cover'; coverEl.style.backgroundPosition = 'center'; }
@@ -3334,13 +3726,20 @@ async function renderCommunity(slug, activeTab = 'posts') {
 
   qs('#community-avatar-upload')?.addEventListener('change', async function() {
     const file = this.files[0]; if (!file) return;
-    showToast('Uploading…');
-    const url = await uploadFile(file, 'avatars', 'communities');
-    await sb.from('communities').update({ avatar_url: url }).eq('id', community.id);
-    community.avatar_url = url;
-    const el = qs('#comm-avatar-el');
-    if (el) el.innerHTML = `<img src="${url}" alt="" style="width:100%;height:100%;object-fit:cover" />`;
-    showToast('Avatar updated!');
+    showAvatarCropper(file, async (blob) => {
+      showToast('Uploading…');
+      const oldUrl = community.avatar_url;
+      const path = `communities/${community.id}/avatar_${Date.now()}.jpg`;
+      const { error: upErr } = await sb.storage.from('avatars').upload(path, blob, { contentType: 'image/jpeg', cacheControl: '3600', upsert: true });
+      if (upErr) { showToast('Upload failed: ' + upErr.message, 'error'); return; }
+      const { data: { publicUrl } } = sb.storage.from('avatars').getPublicUrl(path);
+      await sb.from('communities').update({ avatar_url: publicUrl }).eq('id', community.id);
+      if (oldUrl) await deleteStorageFile(oldUrl, 'avatars');
+      community.avatar_url = publicUrl;
+      const el = qs('#comm-avatar-el');
+      if (el) el.innerHTML = `<img src="${publicUrl}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:inherit" />`;
+      showToast('Avatar updated!');
+    });
   });
 }
 
@@ -3350,7 +3749,7 @@ async function loadCommunityPosts(communityId, communitySlug = '') {
   el.innerHTML = '<div class="full-loader"><div class="spinner"></div></div>';
 
   const { data, error } = await sb.from('posts')
-    .select('id, content, post_type, media_url, media_type, created_at, user_id, view_count, quote_of, profiles(id, username, avatar_url, display_name, verified), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)')
+    .select('id, content, post_type, media_url, media_type, created_at, user_id, view_count, quote_of, profiles(id, username, avatar_url, display_name, verified, banned), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)')
     .eq('community_id', communityId)
     .is('reply_to', null)
     .order('created_at', { ascending: false })
@@ -3383,7 +3782,7 @@ async function loadCommunityMembers(communityId, isAdmin) {
   el.innerHTML = '<div class="full-loader"><div class="spinner"></div></div>';
 
   const { data } = await sb.from('community_members')
-    .select('role, user_id, created_at, profiles(id, username, avatar_url, display_name, verified)')
+    .select('role, user_id, created_at, profiles(id, username, avatar_url, display_name, verified, banned)')
     .eq('community_id', communityId)
     .order('created_at', { ascending: true });
 
@@ -3423,22 +3822,20 @@ async function openMemberManageMenu(btn, communityId, username) {
     .select('role, user_id').eq('community_id', communityId).eq('user_id', btn.dataset.uid).single();
   if (!mem) return;
 
-  const targetRole = mem.role;
+  const myRole = btn.dataset.role;
   const menu = document.createElement('div');
   menu.id = 'member-manage-menu';
   menu.style.cssText = `position:absolute;right:16px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:4px;z-index:200;min-width:160px;box-shadow:0 8px 24px rgba(0,0,0,.3)`;
 
   const actions = [];
-  if (targetRole !== 'admin') {
+  if (myRole !== 'admin') {
     actions.push({ label: 'Make admin', fn: async () => {
-      const { error } = await sb.from('community_members').update({ role: 'admin' }).eq('community_id', communityId).eq('user_id', mem.user_id);
-      if (error) { showToast('Error: ' + error.message); return; }
+      await sb.from('community_members').update({ role: 'admin' }).eq('community_id', communityId).eq('user_id', mem.user_id);
       showToast(`@${username} is now an admin.`); menu.remove(); loadCommunityMembers(communityId, true);
     }});
   } else {
     actions.push({ label: 'Remove admin', fn: async () => {
-      const { error } = await sb.from('community_members').update({ role: 'member' }).eq('community_id', communityId).eq('user_id', mem.user_id);
-      if (error) { showToast('Error: ' + error.message); return; }
+      await sb.from('community_members').update({ role: 'member' }).eq('community_id', communityId).eq('user_id', mem.user_id);
       showToast(`@${username} is now a member.`); menu.remove(); loadCommunityMembers(communityId, true);
     }});
   }
@@ -3448,10 +3845,8 @@ async function openMemberManageMenu(btn, communityId, username) {
       message: `Remove <strong>@${esc(username)}</strong> from this community?`,
       confirmText: 'Remove',
       confirmClass: 'btn-danger',
-      danger: true,
       onConfirm: async () => {
-        const { error } = await sb.from('community_members').delete().eq('community_id', communityId).eq('user_id', mem.user_id);
-        if (error) { showToast('Error: ' + error.message); return; }
+        await sb.from('community_members').delete().eq('community_id', communityId).eq('user_id', mem.user_id);
         showToast(`@${username} removed.`); menu.remove(); loadCommunityMembers(communityId, true);
       }
     });
@@ -3495,6 +3890,11 @@ function showCommunitySettings(community, slug) {
         </label>
       </div>
       <div id="cs-err" class="form-msg error"></div>
+      ${community.avatar_url || community.cover_url ? `
+      <div style="display:flex;gap:8px;margin-bottom:4px;flex-wrap:wrap">
+        ${community.avatar_url ? `<button class="btn-sm btn-outline btn-danger" id="cs-remove-avatar">Remove avatar</button>` : ''}
+        ${community.cover_url ? `<button class="btn-sm btn-outline btn-danger" id="cs-remove-banner">Remove banner</button>` : ''}
+      </div>` : ''}
       <div class="custom-modal-actions">
         <button class="btn-sm btn-outline btn-danger" id="cs-delete">Delete community</button>
         <div style="display:flex;gap:8px">
@@ -3509,6 +3909,24 @@ function showCommunitySettings(community, slug) {
   const close = () => { modal.classList.remove('open'); setTimeout(() => modal.remove(), 200); };
   qs('#cs-cancel', modal).addEventListener('click', close);
   qs('.custom-modal-scrim', modal).addEventListener('click', close);
+
+  qs('#cs-remove-avatar', modal)?.addEventListener('click', async () => {
+    await sb.from('communities').update({ avatar_url: null }).eq('id', community.id);
+    await deleteStorageFile(community.avatar_url, 'avatars');
+    community.avatar_url = null;
+    showToast('Avatar removed.');
+    close();
+    renderCommunity(slug, activeTab);
+  });
+
+  qs('#cs-remove-banner', modal)?.addEventListener('click', async () => {
+    await sb.from('communities').update({ cover_url: null }).eq('id', community.id);
+    await deleteStorageFile(community.cover_url, 'avatars');
+    community.cover_url = null;
+    showToast('Banner removed.');
+    close();
+    renderCommunity(slug, activeTab);
+  });
 
   qs('#cs-save', modal).addEventListener('click', async () => {
     const name = qs('#cs-name', modal).value.trim();
@@ -3903,7 +4321,7 @@ async function renderDiscussion(communitySlug, postId) {
 
   const [{ data: post }, { data: community }] = await Promise.all([
     sb.from('posts')
-      .select('id, content, post_type, media_url, created_at, user_id, view_count, profiles(id, username, avatar_url, display_name, verified), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)')
+      .select('id, content, post_type, media_url, created_at, user_id, view_count, profiles(id, username, avatar_url, display_name, verified, banned), reactions(id, user_id, type), reposts(id, user_id), bookmarks(id, user_id)')
       .eq('id', postId).single(),
     sb.from('communities').select('id, name, slug, avatar_url, avatar_color, cover_color').eq('slug', communitySlug).single()
   ]);
@@ -3911,7 +4329,7 @@ async function renderDiscussion(communitySlug, postId) {
   if (!post || !community) { view.innerHTML = emptyState('Post not found.'); return; }
 
   const { data: msgs } = await sb.from('post_discussions')
-    .select('id, content, created_at, user_id, reply_to_id, profiles(id, username, avatar_url, display_name, verified, equipped_badge), reply:reply_to_id(id, content, user_id, profiles(username, display_name))')
+    .select('id, content, created_at, user_id, reply_to_id, profiles(id, username, avatar_url, display_name, verified, banned, equipped_badge), reply:reply_to_id(id, content, user_id, profiles(username, display_name))')
     .eq('post_id', postId)
     .order('created_at', { ascending: true });
 
@@ -4113,7 +4531,7 @@ async function renderDiscussion(communitySlug, postId) {
       if (bar) bar.style.display = 'none';
       const { data: newMsg, error } = await sb.from('post_discussions')
         .insert(payload)
-        .select('id, content, created_at, user_id, reply_to_id, profiles(id, username, avatar_url, display_name, verified, equipped_badge)')
+        .select('id, content, created_at, user_id, reply_to_id, profiles(id, username, avatar_url, display_name, verified, banned, equipped_badge)')
         .single();
       sendBtn.disabled = false;
       if (error) { showToast('Error sending message'); return; }
@@ -4253,30 +4671,20 @@ async function renderMarketplace() {
 }
 
 async function showBoostModal(community, currentTotal, currentLevel) {
-  const nextLevel = BOOST_LEVELS[currentLevel.level + 1] || null;
-  const barPct = nextLevel
-    ? Math.min(100, Math.round((currentTotal - currentLevel.threshold) / (nextLevel.threshold - currentLevel.threshold) * 100))
-    : 100;
-
   const modal = document.createElement('div');
   modal.id = 'boost-modal';
   modal.innerHTML = `
     <div class="custom-modal-scrim"></div>
     <div class="custom-modal-box" style="max-width:400px">
       <h3 class="custom-modal-title">⚡ Boost Community</h3>
-      <div class="boost-levelup-msg" style="color:${currentLevel.level > 0 ? currentLevel.color : 'var(--muted2)'}">
-        ${currentLevel.level > 0 ? `${currentLevel.label} active` : 'No boost yet'}
-        ${nextLevel ? ` · Next: <span style="color:${nextLevel.color}">${nextLevel.label}</span>` : ' · <span style="color:#f59e0b">Max level reached! ✨</span>'}
+      <div class="boost-level-track">
+        ${BOOST_LEVELS.filter(l => l.level > 0).map(l => `
+          <div class="boost-level-item ${currentTotal >= l.threshold ? 'reached' : ''}">
+            <span style="color:${l.color}">${l.label}</span>
+            <span class="boost-level-threshold">${l.threshold.toLocaleString()} pts</span>
+          </div>`).join('')}
       </div>
-      <div class="boost-progress-labels">
-        <span>${currentTotal.toLocaleString()} pts</span>
-        <span>${nextLevel ? nextLevel.threshold.toLocaleString() + ' pts' : 'Max'}</span>
-      </div>
-      <div class="boost-progress-track">
-        <div class="boost-progress-fill boost-progress-animated" style="width:${barPct}%;background:linear-gradient(to right,#6b7280,#4ade80,#60a5fa,#a78bfa,#f59e0b)"></div>
-      </div>
-      <div class="boost-progress-sub">${nextLevel ? `${(nextLevel.threshold - currentTotal).toLocaleString()} pts to ${nextLevel.label}` : 'Community fully boosted!'}</div>
-      <div class="boost-fund-info" style="margin-top:12px">
+      <div class="boost-fund-info">
         Community fund: <strong>${currentTotal.toLocaleString()} pts</strong>
         ${currentLevel.level > 0 ? `· <span style="color:${currentLevel.color}">${currentLevel.label} active</span>` : ''}
       </div>
@@ -4322,4 +4730,322 @@ async function showBoostModal(community, currentTotal, currentLevel) {
     showToast(`Donated ${amount} pts to ${community.name}!${lvlMsg}`);
     renderCommunity(community.slug);
   });
+}
+
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = el.scrollHeight + 'px';
+}
+
+function initAutoResize() {
+  const selectors = ['#compose-text', '#reply-text', '#quote-text', '#inline-reply-text', '#ep-bio'];
+  selectors.forEach(sel => {
+    const el = document.querySelector(sel);
+    if (!el) return;
+    el.addEventListener('input', () => autoResize(el));
+  });
+
+  const observer = new MutationObserver(() => {
+    selectors.forEach(sel => {
+      const el = document.querySelector(sel);
+      if (el && !el._autoResize) {
+        el._autoResize = true;
+        el.addEventListener('input', () => autoResize(el));
+      }
+    });
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+}
+
+function initLightbox() {
+  const lb = document.createElement('div');
+  lb.id = 'img-lightbox';
+  lb.innerHTML = `
+    <button id="img-lightbox-close" aria-label="Close">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+    <img id="img-lightbox-img" src="" alt="" />`;
+  document.body.appendChild(lb);
+
+  const closeLb = () => lb.classList.remove('open');
+  lb.addEventListener('click', e => { if (e.target === lb || e.target.closest('#img-lightbox-close')) closeLb(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && lb.classList.contains('open')) closeLb(); });
+}
+
+function openLightbox(src) {
+  const lb = document.getElementById('img-lightbox');
+  if (!lb) return;
+  document.getElementById('img-lightbox-img').src = src;
+  lb.classList.add('open');
+}
+
+function initScrollToTop() {
+  const btn = document.createElement('button');
+  btn.id = 'scroll-top-btn';
+  btn.setAttribute('aria-label', 'Back to top');
+  btn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>`;
+  document.body.appendChild(btn);
+
+  btn.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+
+  let ticking = false;
+  window.addEventListener('scroll', () => {
+    if (!ticking) {
+      requestAnimationFrame(() => {
+        btn.classList.toggle('visible', window.scrollY > 600);
+        const topbar = document.getElementById('topbar');
+        if (topbar) topbar.classList.toggle('scrolled', window.scrollY > 10);
+        ticking = false;
+      });
+      ticking = true;
+    }
+  }, { passive: true });
+}
+
+function initKeyboardShortcuts() {
+  document.addEventListener('keydown', e => {
+    const tag = e.target.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+    switch (e.key) {
+      case 'n': // New post
+        e.preventDefault();
+        if (!currentUser) { location.hash = '#/login'; return; }
+        document.getElementById('compose-modal')?.classList.add('open');
+        setTimeout(() => document.getElementById('compose-text')?.focus(), 80);
+        break;
+      case 'f': // Go to feed
+        e.preventDefault();
+        location.hash = '#/feed';
+        break;
+      case 'e': // Go to explore
+        e.preventDefault();
+        location.hash = '#/explore';
+        break;
+      case 'Escape': // Close modals
+        e.preventDefault();
+        const lb = document.getElementById('img-lightbox');
+        if (lb?.classList.contains('open')) { lb.classList.remove('open'); return; }
+        const compose = document.getElementById('compose-modal');
+        if (compose?.classList.contains('open')) { compose.classList.remove('open'); return; }
+        document.querySelectorAll('.modal.open').forEach(m => m.classList.remove('open'));
+        document.querySelectorAll('#custom-confirm-modal, #custom-input-modal, #boost-modal').forEach(m => {
+          m.classList.remove('open');
+          setTimeout(() => m.remove(), 200);
+        });
+        break;
+      case '?': // Show shortcuts hint
+        showToast('n=New post · f=Feed · e=Explore · Esc=Close');
+        break;
+    }
+  });
+}
+
+function initCounterFeedback() {
+  const observer = new MutationObserver(() => {
+    const countEl = document.getElementById('compose-count');
+    const counterEl = countEl?.closest('.compose-counter');
+    if (!countEl || !counterEl) return;
+    const count = parseInt(countEl.textContent) || 0;
+    counterEl.classList.toggle('warn',   count > 1600 && count <= 1900);
+    counterEl.classList.toggle('danger', count > 1900);
+  });
+
+  const composeCount = document.getElementById('compose-count');
+  if (composeCount) {
+    observer.observe(composeCount, { childList: true, characterData: true, subtree: true });
+    const textarea = document.getElementById('compose-text');
+    if (textarea) {
+      textarea.addEventListener('input', () => {
+        const c = textarea.value.length;
+        composeCount.textContent = c;
+        const counterEl = composeCount.closest('.compose-counter');
+        if (counterEl) {
+          counterEl.classList.toggle('warn',   c > 1600 && c <= 1900);
+          counterEl.classList.toggle('danger', c > 1900);
+        }
+      });
+    }
+  }
+}
+
+function initPasteImage() {
+  document.addEventListener('paste', e => {
+    const modal = document.getElementById('compose-modal');
+    if (!modal?.classList.contains('open')) return;
+    const items = Array.from(e.clipboardData?.items || []);
+    const imageItem = items.find(i => i.type.startsWith('image/'));
+    if (!imageItem) return;
+    e.preventDefault();
+
+    const imageBtn = document.querySelector('.ctype-btn[data-type="image"]');
+    if (imageBtn) imageBtn.click();
+
+    const file = imageItem.getAsFile();
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const img = document.getElementById('compose-img-el');
+      const preview = document.getElementById('compose-img-preview');
+      const zone = document.getElementById('image-upload-zone');
+      if (img && preview && zone) {
+        img.src = ev.target.result;
+        preview.classList.remove('hidden');
+        zone.classList.add('hidden');
+      }
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(file);
+      const fileInput = document.getElementById('compose-img-input');
+      if (fileInput) fileInput.files = dataTransfer.files;
+    };
+    reader.readAsDataURL(file);
+    showToast('Image pasted!');
+  });
+}
+
+function initLikeAnimation() {
+  document.addEventListener('click', e => {
+    const btn = e.target.closest('.like-btn');
+    if (!btn) return;
+    btn.classList.remove('pop');
+    void btn.offsetWidth; // reflow to restart animation
+    if (!btn.classList.contains('liked')) btn.classList.add('pop');
+  }, true);
+}
+
+function initTimeAgoUpdater() {
+  setInterval(() => {
+    document.querySelectorAll('.post-time, .reply-time, .notif-time').forEach(el => {
+      const ts = el.dataset.ts;
+      if (ts) el.textContent = timeAgo(ts);
+    });
+  }, 60_000); // every minute
+}
+
+function initDragDrop() {
+  const zone = document.getElementById('image-upload-zone');
+  if (!zone) return;
+
+  const observer = new MutationObserver(() => {
+    const z = document.getElementById('image-upload-zone');
+    if (!z || z._ddInit) return;
+    z._ddInit = true;
+    z.addEventListener('dragover', e => { e.preventDefault(); z.style.borderColor = 'var(--blue)'; });
+    z.addEventListener('dragleave', () => { z.style.borderColor = ''; });
+    z.addEventListener('drop', e => {
+      e.preventDefault();
+      z.style.borderColor = '';
+      const file = e.dataTransfer.files[0];
+      if (!file || !file.type.startsWith('image/')) return;
+      const reader = new FileReader();
+      reader.onload = ev => {
+        const img = document.getElementById('compose-img-el');
+        const preview = document.getElementById('compose-img-preview');
+        if (img && preview) {
+          img.src = ev.target.result;
+          preview.classList.remove('hidden');
+          z.classList.add('hidden');
+        }
+        const dataTransfer = new DataTransfer();
+        dataTransfer.items.add(file);
+        const fi = document.getElementById('compose-img-input');
+        if (fi) fi.files = dataTransfer.files;
+      };
+      reader.readAsDataURL(file);
+    });
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+}
+
+function initNewPostBtn() {
+  const btn = document.getElementById('new-post-btn');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    if (!requireAuth()) return;
+    document.getElementById('compose-modal')?.classList.add('open');
+    setComposeAvatar();
+    setTimeout(() => document.getElementById('compose-text')?.focus(), 80);
+  });
+}
+
+function initPostCardNavigation() {
+  document.addEventListener('click', e => {
+    const card = e.target.closest('.post-card');
+    if (!card) return;
+    if (
+      e.target.closest('button') ||
+      e.target.closest('a') ||
+      e.target.closest('img') ||
+      e.target.closest('video') ||
+      e.target.closest('.poll-bar-wrap') ||
+      e.target.closest('.post-quote-card') ||
+      e.target.tagName === 'BUTTON'
+    ) return;
+
+    const postId = card.dataset.postId;
+    if (postId) location.hash = `#/post/${postId}`;
+  });
+}
+
+function patchInlineReply() {
+  document.addEventListener('input', e => {
+    if (e.target.id === 'inline-reply-text') autoResize(e.target);
+  }, true);
+}
+
+function skeletonPosts(count = 4) {
+  return Array.from({ length: count }, () => `
+    <div class="skeleton-post">
+      <div class="skeleton-post-head">
+        <div class="skeleton skeleton-avatar"></div>
+        <div class="skeleton-meta">
+          <div class="skeleton skeleton-name"></div>
+          <div class="skeleton skeleton-handle"></div>
+        </div>
+      </div>
+      <div class="skeleton skeleton-line w-full"></div>
+      <div class="skeleton skeleton-line w-3q"></div>
+      <div class="skeleton skeleton-line w-half"></div>
+    </div>`).join('');
+}
+
+function addShortcutHints() {
+  const newPostBtn = document.getElementById('new-post-btn');
+  if (newPostBtn) {
+    newPostBtn.style.position = 'relative';
+    newPostBtn.setAttribute('title', 'New post (N)');
+  }
+}
+
+function initViewHeaderShadow() {
+  document.addEventListener('scroll', () => {
+    const headers = document.querySelectorAll('.view-header');
+    headers.forEach(h => {
+      h.classList.toggle('shadowed', window.scrollY > 80);
+    });
+  }, { passive: true });
+}
+
+function initEnhancements() {
+  initAutoResize();
+  initLightbox();
+  initScrollToTop();
+  initKeyboardShortcuts();
+  initCounterFeedback();
+  initPasteImage();
+  initLikeAnimation();
+  initTimeAgoUpdater();
+  initDragDrop();
+  initNewPostBtn();
+  initPostCardNavigation();
+  patchInlineReply();
+  addShortcutHints();
+  initViewHeaderShadow();
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initEnhancements);
+} else {
+  initEnhancements();
 }
